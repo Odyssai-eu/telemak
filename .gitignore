@@ -8,13 +8,13 @@ Package.resolved
 *.xcodeproj/
 *.xcworkspace/
 
-# Local Claude / dev notes (private)
+# Local Claude / dev notes (private — only at repo root, not under docs/)
 .claude/
 .claude-memory
 CLAUDE.md
-SESSION-*.md
-NOTES-*.md
-TODO.md
+/SESSION-*.md
+/NOTES-*.md
+/TODO.md
 
 # Local config / generated
 ~/.telemak/
