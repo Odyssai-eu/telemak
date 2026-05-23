@@ -20,3 +20,5 @@ TODO.md
 ~/.telemak/
 config.local.*
 *.log
+.xcbuild/
+*.profraw
