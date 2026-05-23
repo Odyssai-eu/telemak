@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+*.xcodeproj/
+*.xcworkspace/
+
+# Local Claude / dev notes (private)
+.claude/
+.claude-memory
+CLAUDE.md
+SESSION-*.md
+NOTES-*.md
+TODO.md
+
+# Local config / generated
+~/.telemak/
+config.local.*
+*.log
