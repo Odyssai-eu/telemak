@@ -1,6 +1,7 @@
 import Foundation
 import MLXLMCommon
 import MLXLLM
+import MLXVLM   // Registers the VLM trampoline so qwen3_5 (Qwen3.6 VLM) loads.
 import MLXHuggingFace
 import HuggingFace
 import Tokenizers
