@@ -23,6 +23,12 @@ struct ChatCompletionRequest: Codable, Sendable {
     var tools: [JSONValue]?
     var toolChoice: JSONValue?
 
+    // KV cache quantization knobs (Block 3 / C perf follow-up).
+    // `kvBits` of nil leaves the cache at full precision (default).
+    var kvBits: Int?
+    var kvGroupSize: Int?
+    var quantizedKvStart: Int?
+
     enum CodingKeys: String, CodingKey {
         case model
         case messages
@@ -40,6 +46,9 @@ struct ChatCompletionRequest: Codable, Sendable {
         case enableThinking = "enable_thinking"
         case tools
         case toolChoice = "tool_choice"
+        case kvBits = "kv_bits"
+        case kvGroupSize = "kv_group_size"
+        case quantizedKvStart = "quantized_kv_start"
     }
 }
 
