@@ -23,33 +23,130 @@ The new plan is the "Inferencer route" — port the Python reference to
 Swift and own the model layer end-to-end. Independence from
 mlx-swift-lm's visibility constraints on the affected classes.
 
-## Status — Unit 1 in progress (2026-05-24 PM)
+## Status — Unit 1 SHIPPED (2026-05-24 PM)
 
-Unit 1a landed : **wrapper class + config + sanitize** in
-`Sources/Telemak/Engine/MTP/`. The decoder layer is stubbed
-(`MTPDecoderLayerStub` raises if invoked). The scaffold compiles, the
-weight remap (`mtp.*` prefix strip + `experts.gate_up_proj` split +
-RMSNorm `+1`) is in place and ready for testing once the layer lands.
+Both 1a (scaffold) and 1b (decoder layer vendor) landed via PR #25.
+The MTP architecture port is complete : `Qwen35MTPDraftModel` +
+config + sanitize + `MTPDecoderLayer` all in
+`Sources/Telemak/Engine/MTP/`. Build green.
 
-Unit 1b (next session) : vendor the Qwen3.5 / Qwen3.6 decoder-layer
-stack from mlx-swift-lm. Notes :
+Vendoring decision : the upstream `Qwen35DecoderLayer` /
+`Qwen35Attention` / `Qwen35SparseMoeBlock` are module-internal in
+mlx-swift-lm, so we copy-pasted just the parts MTP actually needs
+into our target. Because the MTP draft model forces
+`full_attention_interval=1` (Python `replace(..., full_attention_interval=1)`),
+all MTP layers are full attention — we dropped the linear-attention
+branch (`Qwen35GatedDeltaNet`) entirely. The vendored file shrinks
+from ~700 LOC to ~250.
 
-- `Qwen35TextConfiguration` is `public struct` but its stored
-  properties are *internal* — we can't read `hiddenSize` etc. across
-  the module boundary. Telemak's MTP scaffold defines its own
-  `Qwen35TextFields` decoded from the same JSON, exposing only the
-  fields the MTP wrapper actually needs. Whatever vendor we end up
-  with for the decoder layer must use this struct (or a copy in its
-  own header).
-- mlx-swift-lm's `Qwen35DecoderLayer` / `Qwen35Attention` /
-  `Qwen35SparseMoeBlock` are `final class … : Module` with no `public`
-  modifier — module-internal, invisible from Telemak. Vendoring is
-  done by **copying the source files into `Sources/Telemak/Engine/MTP/Vendored/`** —
-  they keep their internal visibility but are part of *our* target,
-  so the wrapper sees them. Dependencies to import on the vendored
-  files : `Qwen3NextMLP` from `Qwen3Next.swift` (also non-public).
-  No public type adjustment required to upstream — pure copy-paste
-  inside our own module.
+Public mlx-swift-lm helpers do the heavy lifting :
+`initializeRope`, `applyRotaryPosition`, `attentionWithCacheUpdate`,
+`SwitchGLU`, `RoPELayer`, `RMSNorm`. Only the layer shape + the
+forward pass live in our target.
+
+## Next units — runbook for the follow-up session
+
+### Unit 2 — speculative loop port
+
+Port `mlx_vlm/speculative/mtp.py` (920 LOC) to
+`Sources/Telemak/Engine/MTP/MTPSpeculativeIterator.swift`.
+
+The non-obvious bits :
+
+- The draft model's forward takes `(token_embedding, hidden_state)`
+  from the *target's* last hidden state — not just a token id. The
+  draft calls back into the target's `embed_tokens` (borrowed at
+  bind time) so the embedding lookup goes through the main model's
+  weights, not its own.
+- Each spec round emits `block_size - 1` candidate tokens (default
+  `block_size = 3` for Qwen3.6-35B-MTP → 2 candidates per round
+  + the seed from the prefill).
+- Acceptance/rejection sweeps over the candidate window: the target
+  verifies all candidates in one batched forward pass, the loop
+  finds the first reject, advances by that many accepted tokens
+  plus one bonus, trims the draft's KV cache by the rejected count.
+- mlx-swift-lm has `SpeculativeTokenIterator` in
+  `Libraries/MLXLMCommon/Evaluate.swift` — wired for classic
+  drafters. Either extend that class (if public-extension points
+  exist) or write a parallel `MTPSpeculativeIterator` that follows
+  the same protocol contract (`AsyncSequence<(token: Int, info: …)>`).
+- Skip the linear-attention KV-cache-sharing optimisation for the
+  first cut — correctness first, perf later (xllm.h and lmdeploy
+  reference it as a separate tuning round).
+
+### Unit 3 — Telemak API + ModelRegistry wiring
+
+`/admin/load` accepts an optional `draft_model` field + a
+`num_draft_tokens` knob :
+
+```jsonc
+POST /admin/load
+{
+  "model": "inferencerlabs/Qwen3.6-35B-A3B-MLX-9bit",
+  "draft_model": "inferencerlabs/Qwen3.6-35B-A3B-MTP-MLX-9bit",
+  "num_draft_tokens": 3
+}
+```
+
+The tricky parts that aren't just JSON plumbing :
+
+- **Loader path** : mlx-swift-lm's `LLMTypeRegistry.shared` returns
+  `LanguageModel`, but our `Qwen35MTPDraftModel` is plain `Module`
+  (no `lm_head`, no `embed_tokens` — those are borrowed from the
+  target at bind time). The shared registry rejects "qwen3_5_mtp".
+  We need a parallel loader path in `ModelLoader` that :
+  1. Detects `model_type == "qwen3_5_mtp"` in the config.
+  2. Instantiates `Qwen35MTPDraftModel(config)` directly (no
+     factory dispatch).
+  3. Loads safetensors via `loadWeights(model:weights:)` —
+     `MLXLMCommon`'s public weight loader — after running the
+     wrapper's `sanitize()`.
+  4. Returns a wrapper container (not the standard
+     `ModelContainer`, since the draft has no tokenizer of its own
+     — it borrows from the target).
+- **ModelRegistry pairing** : add an optional
+  `draftId: String?` to `Loaded` plus a `pairing` map
+  `[String: String]` (main_id → draft_id). Drafts shouldn't appear
+  in `/v1/models` (they're internal to spec decoding) but they DO
+  consume RAM — update the memory accounting accordingly.
+- **/v1/chat/completions** auto-uses the draft when one is paired.
+  Reads `pairing[req.model]` and switches to
+  `MTPSpeculativeIterator` instead of `TokenIterator`. No client
+  API change.
+- **/.well-known/inference-engine.json** advertises :
+  ```jsonc
+  "speculative_decoding": {
+    "supported": true,
+    "modes": ["mtp_adapter"],
+    "active_pairs": [
+      {"main": "<id>", "draft": "<id>", "block_size": 3,
+       "acceptance_rate_recent": 0.87}
+    ]
+  }
+  ```
+
+### Bonus — `split-mtp` admin endpoint
+
+`POST /admin/models/split-mtp { source, output }` invokes Blaizzy's
+`split.py` via subprocess. Lets a Telemak operator pop an MTP
+drafter out of any Qwen3.5 / Qwen3.6 source from the dashboard.
+
+Prereq : the host has `mlx-vlm` installed (`pip install mlx-vlm`).
+The endpoint shells out to `python3 -m
+mlx_vlm.speculative.drafters.qwen3_5_mtp.split <source> --output
+<output>` and surfaces stdout / stderr to the response. If
+`mlx-vlm` isn't installed, return a clear 503 with the install
+command.
+
+### Order of operations next session
+
+1. Unit 3 loader path (Telemak's parallel `Qwen35MTPDraftModel`
+   loader from local-only directory).
+2. Smoke test : load `Qwen3.6-35B-A3B-MTP-MLX-9bit`, instantiate
+   the model, verify weights load without shape mismatch.
+3. Unit 2 speculative loop.
+4. Unit 3 final wiring + capability advertise.
+5. Bonus split-mtp endpoint.
 
 ## The canonical reference — Blaizzy's `mlx-vlm`
 
