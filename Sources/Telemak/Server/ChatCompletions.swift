@@ -341,27 +341,41 @@ struct ChatCompletionsHandler: Sendable {
                 )
                 try await send(stop)
 
+                // Standard OpenAI streaming `usage` chunk — emitted between
+                // finish_reason and [DONE] so clients can render tok/s,
+                // prompt/completion tokens, total. We always emit (spec gates
+                // it on `stream_options.include_usage: true`, but clients
+                // that don't read it discard silently — and Companion's
+                // chat-meta row depends on this signal).
+                //
+                // Counts come from `GenerateCompletionInfo` when the model
+                // emitted one before the iterator finished; otherwise we
+                // fall back to a coarse character-based estimate matching
+                // the non-stream path.
+                let promptTokens = info?.promptTokenCount ?? max(1, userPrompt.count / 4)
+                let completionTokens = info?.generationTokenCount ?? 1
+                var usageBlock: [String: Any] = [
+                    "prompt_tokens": promptTokens,
+                    "completion_tokens": completionTokens,
+                    "total_tokens": promptTokens + completionTokens,
+                ]
                 if cachedTokens > 0 {
-                    // Surface the cache-hit signal in a usage-style trailing
-                    // chunk. Not standard OpenAI SSE shape but Companion's
-                    // StatsRow reads x_telemak_usage when present.
-                    let usageChunk: [String: Any] = [
-                        "id": id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": modelId,
-                        "choices": [],
-                        "x_telemak_usage": [
-                            "prompt_tokens_details": ["cached_tokens": cachedTokens],
-                        ],
-                    ]
-                    if let payload = try? JSONSerialization.data(withJSONObject: usageChunk) {
-                        var buf = ByteBuffer()
-                        buf.writeString("data: ")
-                        buf.writeBytes(payload)
-                        buf.writeString("\n\n")
-                        try await writer.write(buf)
-                    }
+                    usageBlock["prompt_tokens_details"] = ["cached_tokens": cachedTokens]
+                }
+                let usageChunk: [String: Any] = [
+                    "id": id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": modelId,
+                    "choices": [],
+                    "usage": usageBlock,
+                ]
+                if let payload = try? JSONSerialization.data(withJSONObject: usageChunk) {
+                    var buf = ByteBuffer()
+                    buf.writeString("data: ")
+                    buf.writeBytes(payload)
+                    buf.writeString("\n\n")
+                    try await writer.write(buf)
                 }
 
                 try await writer.write(ByteBuffer(string: "data: [DONE]\n\n"))
