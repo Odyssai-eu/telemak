@@ -1,5 +1,7 @@
 import Foundation
 import Hummingbird
+import MLXLLM
+import MLXLMCommon
 
 /// `GET /v1/models`, `GET /admin/models/available`, `GET /admin/memory`,
 /// `POST /admin/load`, `POST /admin/unload`.
@@ -24,6 +26,9 @@ struct ModelsHandler: Sendable {
         }
         router.post("/admin/models/split-mtp") { request, _ async throws -> Response in
             try await self.splitMTP(request)
+        }
+        router.post("/admin/mtp/smoke") { request, _ async throws -> Response in
+            try await self.mtpSmoke(request)
         }
     }
 
@@ -265,6 +270,90 @@ struct ModelsHandler: Sendable {
         let data =
             (try? JSONSerialization.data(withJSONObject: payload)) ?? Data("{}".utf8)
         return jsonResponse(.ok, data: data)
+    }
+
+    // MARK: - POST /admin/mtp/smoke
+
+    /// Drive the MTP speculative iterator directly, bypassing
+    /// /v1/chat/completions. Returns generated text + acceptance stats
+    /// + timing. Used to validate the spec-decoding math without going
+    /// through the full chat pipeline.
+    private func mtpSmoke(_ request: Request) async throws -> Response {
+        struct SmokeBody: Decodable {
+            let model: String
+            let prompt: String
+            let max_tokens: Int?
+        }
+        let buf = try await request.body.collect(upTo: 1 << 16)
+        let body: SmokeBody
+        do {
+            body = try JSONDecoder().decode(SmokeBody.self, from: Data(buffer: buf))
+        } catch {
+            return jsonError(
+                .badRequest, code: "invalid_request_error",
+                message: "expected {\"model\":\"<id>\",\"prompt\":\"<text>\",\"max_tokens\":N}: \(error)")
+        }
+        let mainId = body.model
+        guard let main = await registry.get(mainId) else {
+            return jsonError(.notFound, code: "model_not_loaded",
+                              message: "main model '\(mainId)' is not loaded")
+        }
+        guard let draftId = await registry.draftId(for: mainId),
+              let draftEntry = await registry.getDraft(draftId)
+        else {
+            return jsonError(.badRequest, code: "no_draft_paired",
+                              message: "no MTP draft paired with main model '\(mainId)'")
+        }
+        let maxTok = body.max_tokens ?? 128
+        let promptText = body.prompt
+        let draftModel = draftEntry.model
+
+        return try await main.container.perform { ctx in
+            // Tokenize the prompt with the main model's tokenizer.
+            let promptTokens = ctx.tokenizer.encode(text: promptText)
+            guard !promptTokens.isEmpty else {
+                throw HTTPError(.badRequest, message: "empty prompt after tokenization")
+            }
+            // Cast the main model to our shared Qwen3.5/3.6 protocol.
+            // Both the LLM-side (Qwen35Model / Qwen35MoEModel) and the
+            // VLM-side (Qwen35 / Qwen35MoE) conform on the Odyssai-eu
+            // fork via fork-added forwardWithHidden / embed / applyLMHead.
+            guard let qwen = ctx.model as? any Qwen35HiddenStateProvider else {
+                throw HTTPError(.badRequest,
+                                message: "main model is not Qwen3.5/3.6 (\(type(of: ctx.model))); MTP unsupported")
+            }
+            let start = Date()
+            let iterator = MTPSpeculativeIterator(
+                main: qwen,
+                draft: draftModel,
+                promptTokens: promptTokens,
+                maxTokens: maxTok
+            )
+            var generated: [Int] = []
+            while let tok = iterator.next() {
+                generated.append(tok)
+            }
+            let elapsed = Date().timeIntervalSince(start)
+            let text = ctx.tokenizer.decode(tokenIds: generated)
+            let tps = elapsed > 0 ? Double(generated.count) / elapsed : 0
+            let payload: [String: Any] = [
+                "text": text,
+                "tokens": generated.count,
+                "rounds": iterator.roundsRun,
+                "proposed": iterator.totalProposed,
+                "accepted": iterator.totalAccepted,
+                "acceptance_rate": iterator.acceptanceRate,
+                "elapsed_s": elapsed,
+                "tokens_per_sec": tps,
+                "block_size": iterator.blockSize,
+            ]
+            let data = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data("{}".utf8)
+            return Response(
+                status: .ok,
+                headers: [.contentType: "application/json"],
+                body: ResponseBody(byteBuffer: ByteBuffer(data: data))
+            )
+        }
     }
 
     // MARK: - error helpers

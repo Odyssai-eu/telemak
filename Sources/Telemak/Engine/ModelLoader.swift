@@ -39,26 +39,52 @@ public enum ModelLoader {
         if identifier.hasPrefix("/") {
             if let url = resolveDirectory(at: identifier) {
                 let prepared = (try? prepareConfigForMLX(originalDir: url, id: identifier)) ?? url
-                return try await loadModelContainer(
-                    from: prepared,
-                    using: #huggingFaceTokenizerLoader()
-                )
+                return try await dispatchedLoad(prepared: prepared)
             }
         }
 
         if let modelsDir = ProcessInfo.processInfo.environment["TELEMAK_MODELS_DIR"],
            let url = resolveModelsDir(modelsDir, id: identifier) {
             let prepared = (try? prepareConfigForMLX(originalDir: url, id: identifier)) ?? url
-            return try await loadModelContainer(
-                from: prepared,
-                using: #huggingFaceTokenizerLoader()
-            )
+            return try await dispatchedLoad(prepared: prepared)
         }
 
         let configuration = ModelConfiguration(id: identifier)
         return try await #huggingFaceLoadModelContainer(
             configuration: configuration,
             progressHandler: progressHandler
+        )
+    }
+
+    /// Inspect the staged config and pick the right factory.
+    ///
+    /// Qwen3.5 / Qwen3.6 ship as VLM checkpoints even when there's no
+    /// vision payload (`vision_config: {}`, no vision_tower weights).
+    /// The default `loadModelContainer` factory dispatch picks
+    /// `MLXVLM.Qwen35` because of the `architectures` hint, but that
+    /// class blocks our V2 MTP path (different hidden-state extraction
+    /// ABI). Force LLM dispatch for text-only Qwen3.5/3.6 ; everything
+    /// else falls through to the generic factory.
+    private static func dispatchedLoad(prepared: URL) async throws -> ModelContainer {
+        let configURL = prepared.appendingPathComponent("config.json")
+        if let data = try? Data(contentsOf: configURL),
+           let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        {
+            let modelType = (root["model_type"] as? String) ?? ""
+            let visionConfig = root["vision_config"] as? [String: Any]
+            let isVisionEmpty = visionConfig == nil || (visionConfig?.isEmpty ?? true)
+            let isQwen35 = modelType == "qwen3_5" || modelType == "qwen3_5_moe"
+                || modelType == "qwen3_5_text"
+            if isQwen35 && isVisionEmpty {
+                return try await LLMModelFactory.shared.loadContainer(
+                    from: prepared,
+                    using: #huggingFaceTokenizerLoader()
+                )
+            }
+        }
+        return try await loadModelContainer(
+            from: prepared,
+            using: #huggingFaceTokenizerLoader()
         )
     }
 
@@ -83,9 +109,28 @@ public enum ModelLoader {
             return originalDir
         }
 
-        // Already has `quantization`? Nothing to fix.
+        // Detect text-only Qwen3.5/3.6 mislabeled as VLM via empty
+        // `vision_config: {}`. The VLMModelFactory wins the factory
+        // dispatch and routes to MLXVLM's Qwen35 class even though
+        // there are no vision tower weights — fine for text generation
+        // but blocks MTP (different forward shape, no clean hidden
+        // state extraction). Strip the empty vision_config to force
+        // LLM dispatch.
+        var droppedEmptyVision = false
+        if let vc = root["vision_config"] as? [String: Any], vc.isEmpty {
+            root["vision_config"] = nil
+            droppedEmptyVision = true
+        }
+
+        // Already has `quantization`? Nothing to fix (modulo the
+        // vision_config strip above).
         guard root["quantization"] == nil, let quantConfig = root["quantization_config"] else {
-            return originalDir
+            if !droppedEmptyVision { return originalDir }
+            // Still need to stage the dir to rewrite config.json with
+            // vision_config removed ; fall through to the staging
+            // block below by injecting an empty quantization carrier.
+            root["__telemak_force_stage__"] = true
+            return try writeStaged(originalDir: originalDir, root: root, id: id)
         }
 
         // Some inferencerlabs configs omit `bits` from `quantization_config`
@@ -112,6 +157,12 @@ public enum ModelLoader {
         }
         root["quantization"] = enriched
 
+        return try writeStaged(originalDir: originalDir, root: root, id: id)
+    }
+
+    private static func writeStaged(originalDir: URL, root: [String: Any], id: String) throws -> URL {
+        var root = root
+        root["__telemak_force_stage__"] = nil  // never persist this marker
         let stagedRoot = FileManager.default
             .homeDirectoryForCurrentUser
             .appendingPathComponent(".telemak/staged-models")
