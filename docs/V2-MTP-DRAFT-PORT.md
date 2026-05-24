@@ -23,6 +23,34 @@ The new plan is the "Inferencer route" — port the Python reference to
 Swift and own the model layer end-to-end. Independence from
 mlx-swift-lm's visibility constraints on the affected classes.
 
+## Status — Unit 1 in progress (2026-05-24 PM)
+
+Unit 1a landed : **wrapper class + config + sanitize** in
+`Sources/Telemak/Engine/MTP/`. The decoder layer is stubbed
+(`MTPDecoderLayerStub` raises if invoked). The scaffold compiles, the
+weight remap (`mtp.*` prefix strip + `experts.gate_up_proj` split +
+RMSNorm `+1`) is in place and ready for testing once the layer lands.
+
+Unit 1b (next session) : vendor the Qwen3.5 / Qwen3.6 decoder-layer
+stack from mlx-swift-lm. Notes :
+
+- `Qwen35TextConfiguration` is `public struct` but its stored
+  properties are *internal* — we can't read `hiddenSize` etc. across
+  the module boundary. Telemak's MTP scaffold defines its own
+  `Qwen35TextFields` decoded from the same JSON, exposing only the
+  fields the MTP wrapper actually needs. Whatever vendor we end up
+  with for the decoder layer must use this struct (or a copy in its
+  own header).
+- mlx-swift-lm's `Qwen35DecoderLayer` / `Qwen35Attention` /
+  `Qwen35SparseMoeBlock` are `final class … : Module` with no `public`
+  modifier — module-internal, invisible from Telemak. Vendoring is
+  done by **copying the source files into `Sources/Telemak/Engine/MTP/Vendored/`** —
+  they keep their internal visibility but are part of *our* target,
+  so the wrapper sees them. Dependencies to import on the vendored
+  files : `Qwen3NextMLP` from `Qwen3Next.swift` (also non-public).
+  No public type adjustment required to upstream — pure copy-paste
+  inside our own module.
+
 ## The canonical reference — Blaizzy's `mlx-vlm`
 
 Prince Canuma's [`Blaizzy/mlx-vlm`](https://github.com/Blaizzy/mlx-vlm)
