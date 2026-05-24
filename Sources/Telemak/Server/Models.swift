@@ -11,12 +11,29 @@ struct ModelsHandler: Sendable {
         router.get("/v1/models") { _, _ async throws -> Response in
             try await self.list()
         }
+        router.get("/admin/models/available") { _, _ async throws -> Response in
+            self.available()
+        }
         router.post("/admin/load") { request, _ async throws -> Response in
             try await self.load(request)
         }
         router.post("/admin/unload") { request, _ async throws -> Response in
             try await self.unload(request)
         }
+    }
+
+    private func available() -> Response {
+        struct Payload: Encodable {
+            let models: [AvailableModels.Entry]
+        }
+        let entries = AvailableModels.scan()
+        let payload = Payload(models: entries)
+        let data = (try? JSONEncoder().encode(payload)) ?? Data(#"{"models":[]}"#.utf8)
+        return Response(
+            status: .ok,
+            headers: [.contentType: "application/json"],
+            body: ResponseBody(byteBuffer: ByteBuffer(data: data))
+        )
     }
 
     private func list() async throws -> Response {

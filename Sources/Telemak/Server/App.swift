@@ -4,10 +4,12 @@ import Logging
 
 /// Build a Hummingbird application configured for Telemak.
 ///
-/// `registry` is shared across handlers so requests serialize on the same
-/// loaded-model state.
+/// `registry` and `stats` are shared across handlers so requests can both
+/// serialize on model state and feed the `/health` snapshot.
 func buildApplication(
     registry: ModelRegistry,
+    stats: StatsTracker,
+    startTime: Date,
     host: String,
     port: Int,
     logger: Logger
@@ -16,15 +18,8 @@ func buildApplication(
 
     router.add(middleware: LogRequestsMiddleware(.info))
 
-    router.get("/health") { _, _ in
-        return Response(
-            status: .ok,
-            headers: [.contentType: "application/json"],
-            body: ResponseBody(byteBuffer: ByteBuffer(string: #"{"status":"ok"}"#))
-        )
-    }
-
-    ChatCompletionsHandler(registry: registry).add(to: router)
+    HealthHandler(registry: registry, stats: stats, startTime: startTime).add(to: router)
+    ChatCompletionsHandler(registry: registry, stats: stats).add(to: router)
     ModelsHandler(registry: registry).add(to: router)
 
     let app = Application(
