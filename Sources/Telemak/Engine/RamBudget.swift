@@ -9,14 +9,56 @@ import Darwin
 public enum RamBudget {
 
     /// Estimate RAM bytes needed to load `id`. Returns nil if the model isn't
-    /// findable in `TELEMAK_MODELS_DIR` or the HF cache (then load will fail
-    /// anyway with a clearer error from ModelLoader).
+    /// findable in `TELEMAK_MODELS_DIR` or the HF cache. Scoped to a single
+    /// model directory — does NOT walk the entire models tree, which would
+    /// be O(N×M) on hosts with several large models on disk.
     public static func estimate(modelId id: String) -> Int64? {
-        // Reuse the AvailableModels scan and look up by id — it already
-        // walks the right directories and sums file sizes.
-        let entries = AvailableModels.scan()
-        if let entry = entries.first(where: { $0.id == id }) {
-            return Int64(entry.sizeGB * 1_073_741_824.0)
+        if let dir = resolveModelDir(id: id) {
+            return directorySize(at: dir)
+        }
+        return nil
+    }
+
+    /// Resolve `id` → snapshot directory URL. Mirrors ModelLoader's logic
+    /// but doesn't iterate every other model on disk.
+    private static func resolveModelDir(id: String) -> String? {
+        let fm = FileManager.default
+
+        // TELEMAK_MODELS_DIR — Odysseus layout `<root>/<id>` or
+        // `<root>/<id>/snapshots/<hash>/`.
+        if let root = ProcessInfo.processInfo.environment["TELEMAK_MODELS_DIR"], !root.isEmpty {
+            let base = (root as NSString).appendingPathComponent(id)
+            let snapshotsBase = (base as NSString).appendingPathComponent("snapshots")
+            if let snaps = try? fm.contentsOfDirectory(atPath: snapshotsBase) {
+                if let chosen = snaps.filter({ !$0.hasPrefix(".") }).sorted().last {
+                    let candidate = (snapshotsBase as NSString).appendingPathComponent(chosen)
+                    if fileExists((candidate as NSString).appendingPathComponent("config.json")) {
+                        return candidate
+                    }
+                }
+            }
+            if fileExists((base as NSString).appendingPathComponent("config.json")) {
+                return base
+            }
+        }
+
+        // HF cache layout — `<root>/models--<org>--<name>/snapshots/<hash>/`.
+        let hfRoot: String
+        if let env = ProcessInfo.processInfo.environment["HF_HUB_CACHE"], !env.isEmpty {
+            hfRoot = env
+        } else {
+            hfRoot = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".cache/huggingface/hub").path
+        }
+        let dirName = "models--" + id.replacingOccurrences(of: "/", with: "--")
+        let cacheBase = (hfRoot as NSString).appendingPathComponent(dirName)
+        let cacheSnapshots = (cacheBase as NSString).appendingPathComponent("snapshots")
+        if let snaps = try? fm.contentsOfDirectory(atPath: cacheSnapshots) {
+            if let chosen = snaps.filter({ !$0.hasPrefix(".") }).sorted().last {
+                let candidate = (cacheSnapshots as NSString).appendingPathComponent(chosen)
+                if fileExists((candidate as NSString).appendingPathComponent("config.json")) {
+                    return candidate
+                }
+            }
         }
         return nil
     }
@@ -46,5 +88,30 @@ public enum RamBudget {
         if wired > 0 { return wired }
         let physical = totalRam()
         return Int64(Double(physical) * 0.75)
+    }
+
+    // MARK: - utilities
+
+    private static func fileExists(_ path: String) -> Bool {
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && !isDir.boolValue
+    }
+
+    private static func directorySize(at dir: String) -> Int64 {
+        let url = URL(fileURLWithPath: dir)
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .totalFileAllocatedSizeKey, .fileSizeKey]
+        guard let enumerator = FileManager.default.enumerator(
+            at: url, includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles], errorHandler: { _, _ in true }
+        ) else { return 0 }
+        var total: Int64 = 0
+        for case let fileURL as URL in enumerator {
+            guard let values = try? fileURL.resourceValues(forKeys: keys),
+                  values.isRegularFile == true else { continue }
+            if let size = values.totalFileAllocatedSize ?? values.fileSize {
+                total += Int64(size)
+            }
+        }
+        return total
     }
 }
