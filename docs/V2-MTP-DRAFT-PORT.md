@@ -62,61 +62,96 @@ safetensor keys in `Qwen3.6-35B-A3B-MTP-MLX-9bit/model.safetensors`
 match the ModuleInfo paths in `Qwen35MTPDraftModel` +
 `MTPDecoderLayer` + `MTPAttention` + `MTPSparseMoeBlock` exactly.
 
-## Unit 2 — the speculative loop (next session)
+## Unit 2 — the speculative loop
 
-The remaining piece for the 1.6× speedup. Two coupled challenges :
+### Step 1 (SHIPPED) — mlx-swift-lm fork wired
 
-### Challenge A — Hidden state extraction from the target model
+[Odyssai-eu/mlx-swift-lm](https://github.com/Odyssai-eu/mlx-swift-lm)
+branch `feat/v2-mtp-hidden-states` adds three thin public helpers
+on `Qwen35TextModel` / `Qwen35Model` :
 
-The MTP draft model's forward takes `(token_embedding,
-hidden_state)` where `hidden_state` is the *last-layer hidden
-state* of the target (before lm_head). mlx-swift-lm's
-`Qwen35TextModel.callAsFunction` returns logits, not hidden states.
-The intermediate `Qwen35TextModelInner.callAsFunction` (which
-returns hidden states) is module-internal — invisible from Telemak.
+```swift
+public func forwardWithHidden(_ inputs: MLXArray, cache: [KVCache]?) -> (logits, hidden)
+public func embed(_ inputs: MLXArray) -> MLXArray              // borrow target's embed_tokens
+public func applyLMHead(_ hidden: MLXArray) -> MLXArray        // borrow target's lm_head
+```
 
-Three options :
-- **Fork mlx-swift-lm**, expose `Qwen35TextModelInner.callAsFunction`
-  as `public`. Maintain a fork in Odyssai-eu. Low LOC, ongoing rebase
-  cost.
-- **Vendor the entire main model** (Qwen35MoEModel +
-  Qwen35TextModel + Qwen35TextModelInner + Qwen35DecoderLayer +
-  Qwen35Attention + Qwen35GatedDeltaNet + Qwen35SparseMoeBlock +
-  helpers) into `Sources/Telemak/Engine/MTP/Vendored/`. ~2000 LOC
-  of copy-paste, no fork to maintain, but every mlx-swift-lm bump
-  is a manual rebase chore.
-- **Upstream PR** : send ml-explore a PR making the inner classes
-  public-extensible. Right move long-term but blocks on review +
-  release cycle.
+Telemak's `Package.swift` now pins the fork (Odysseus-eu URL +
+`feat/v2-mtp-hidden-states` branch). Build green against the fork ;
+upstream main is otherwise unchanged.
 
-Default to the fork (option 1) for V2 — fastest to ship, leaves the
-door open to upstream later.
+### Step 2 (NOT YET) — `rollback_speculative_cache` on the main model
 
-### Challenge B — Custom iterator (mlx-swift-lm's won't fit)
+When the target rejects a draft proposal, the main model's KV caches
+have to roll back N positions AND — for Qwen3.5/3.6 — the SSM /
+linear-attention caches need their intermediate state restored from
+a per-step buffer. Roughly 40% of layers in Qwen3.6-35B-A3B are
+linear-attention, so a "trim only KV" simplification doesn't work
+— the model's internal state diverges immediately.
 
-`SpeculativeTokenIterator` in `MLXLMCommon/Evaluate.swift` requires
-the draft to be `any LanguageModel`. Our `Qwen35MTPDraftModel` is
-`BaseLanguageModel` but can't conform to `LanguageModel` — it has no
-`lm_head`, no `embed_tokens`, no `prepare(_:cache:windowSize:)` that
-makes sense (it needs the target's hidden state to even start).
+The Blaizzy Python implementation (
+`mlx_vlm/models/qwen3_5/language.py:690 — rollback_speculative_cache`
+) does this with a `gdn_states` buffer captured during the verify
+forward. Porting to Swift requires :
 
-Write a parallel `MTPSpeculativeTokenIterator: TokenIteratorProtocol`
-that drives both models : prefill target → grab hidden states → seed
-draft → loop {draft proposes block_size-1, target batched verifies,
-accept up to first reject, emit bonus, trim draft cache}. ~500 LOC
-of Swift.
+- Modifying `Qwen35GatedDeltaNet.callAsFunction` to optionally
+  capture per-step intermediate states (~30 LOC, in the fork).
+- Implementing the rollback logic on `Qwen35TextModel` (~100 LOC,
+  in the fork).
+- A `target_verify` mode that takes a multi-token block in one
+  forward pass and returns per-position logits + hidden states +
+  the rollback buffer (~80 LOC across attention + MLP).
 
-### Order of work next session
+This is ~250 LOC of *upstream* work in the fork, plus testing
+against reference outputs.
 
-1. Fork mlx-swift-lm in Odyssai-eu ; expose the inner-model
-   `callAsFunction` (single one-line change).
-2. Point `Package.swift` at the fork.
-3. Smoke load the pair end-to-end on max-64 (after TCC regrant).
-4. Write `MTPSpeculativeTokenIterator`.
-5. Wire it into `/v1/chat/completions` : when `pairing[req.model]`
-   exists, switch from `TokenIterator` to MTP.
-6. Benchmark : 300-word reply at Qwen3.6-35B-A3B on max-64, expect
-   >1.5× vs main alone.
+### Step 3 (NOT YET) — `MTPSpeculativeTokenIterator`
+
+Parallel iterator following the `TokenIteratorProtocol` contract,
+implementing the speculative loop :
+
+1. Prefill target with prompt ; sample first bonus token.
+2. Bind draft to target (borrow embed + lm_head).
+3. Prefill draft from the target's hidden + (input_ids[1:] +
+   first_bonus). Seed the draft.
+4. Loop until max_tokens :
+   - Draft proposes `block_size - 1` candidate tokens (autoregressive,
+     `block_size - 1` small forwards through the draft).
+   - Target verifies all candidates in one batched forward
+     (`forwardWithHidden` on `[bonus, draft₀, draft₁, …]`), gets
+     per-position logits + hidden + rollback buffer.
+   - Acceptance walk : compare target's argmax at each position to
+     the draft's proposal. Find first reject ; accept everything
+     before.
+   - `rollback_speculative_cache` trims caches by the rejected
+     count.
+   - Draft `accept_verified_tokens` updates its own cache + seed
+     for the next round.
+
+~500 LOC of Swift. Same algorithmic structure as Blaizzy's
+`_mtp_rounds` in `mlx_vlm/speculative/mtp.py:364`.
+
+### Step 4 (NOT YET) — Wire into /v1/chat/completions
+
+When `registry.draftId(for: req.model)` is set, switch from the
+normal `TokenIterator` to `MTPSpeculativeTokenIterator`. Surface
+acceptance rate + per-round token-count in `/admin/sessions`
+telemetry.
+
+### Status summary
+
+| Step | LOC | Status |
+|---|---|---|
+| 1 — Fork + expose hidden states | ~50 | ✅ shipped |
+| 2 — `rollback_speculative_cache` upstream | ~250 | TODO |
+| 3 — `MTPSpeculativeTokenIterator` | ~500 | TODO |
+| 4 — Wire into chat completions | ~50 | TODO |
+
+Steps 2-4 together are realistically one focused 2-day sprint — the
+hard part isn't LOC count, it's the math correctness (acceptance
+walk + SSM rollback) which needs reference outputs to validate
+against. Inferencer.app demonstrates the speedup so the approach is
+proven ; we just have to land it in Swift.
 
 ## Historical runbook (now stale — kept for context)
 
