@@ -27,11 +27,12 @@ struct ChatCompletionsHandler: Sendable {
         }
 
         let container: ModelContainer
-        do {
-            container = try await registry.ensureLoaded(modelId)
-        } catch {
-            return jsonError(.serviceUnavailable, code: "model_load_failed",
-                              message: "could not load model '\(modelId)': \(error)")
+        if let loaded = await registry.get(modelId) {
+            container = loaded.container
+        } else {
+            // V1: chat does NOT auto-load. Operator must POST /admin/load first.
+            let ready = await registry.loadedModelIds
+            return modelNotLoadedError(requested: modelId, ready: ready)
         }
 
         var params = GenerateParameters()
@@ -199,6 +200,23 @@ struct ChatCompletionsHandler: Sendable {
         return nonSystem.map { msg in
             msg.role == "user" ? msg.content : "[\(msg.role)] \(msg.content)"
         }.joined(separator: "\n\n")
+    }
+
+    private func modelNotLoadedError(requested: String, ready: [String]) -> Response {
+        let payload: [String: Any] = [
+            "error": [
+                "type": "model_not_loaded",
+                "code": "model_not_loaded",
+                "message": "model '\(requested)' is not loaded. POST /admin/load first.",
+                "ready_models": ready,
+            ]
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data("{}".utf8)
+        return Response(
+            status: .notFound,
+            headers: [.contentType: "application/json"],
+            body: ResponseBody(byteBuffer: ByteBuffer(data: data))
+        )
     }
 
     private func jsonError(_ status: HTTPResponse.Status, code: String, message: String) -> Response {
