@@ -22,14 +22,14 @@ import MLXNN
 /// + projects `[2 * hidden_size] → [hidden_size]`. After the layer, a
 /// final RMSNorm. Weights total ~906 MB for Qwen3.6-35B-A3B-MTP at 9-bit.
 ///
-/// ## Status — V2 Unit 1 scaffold
+/// ## Status — V2 Unit 1 complete (architecture port)
 ///
-/// This file lands the **wrapper + sanitize + config wiring**. The
-/// decoder layer itself is stubbed via `MTPDecoderLayerStub` because the
-/// mlx-swift-lm `Qwen35DecoderLayer` is module-internal — see the
-/// V2-MTP-DRAFT-PORT.md "Option A vs B" discussion. The decoder layer
-/// vendor (Option A) lands in a follow-up commit ; for now the model
-/// builds and instantiates, but `callAsFunction()` raises.
+/// Wrapper class + config wiring + weight remap + decoder layer all
+/// in place. The decoder layer (`MTPDecoderLayer` in
+/// `Qwen35MTPLayer.swift`) is vendored from mlx-swift-lm's
+/// `Qwen35DecoderLayer`, trimmed to just the full-attention + MoE
+/// path that MTP actually uses (MTP forces
+/// `full_attention_interval=1` ; no linear-attention branch).
 ///
 /// References :
 /// - `Blaizzy/mlx-vlm/mlx_vlm/speculative/drafters/qwen3_5_mtp/qwen3_5_mtp.py`
@@ -48,9 +48,8 @@ public final class Qwen35MTPDraftModel: Module {
     /// Final norm before LM head.
     @ModuleInfo(key: "norm") public var norm: RMSNorm
     /// MTP transformer layers (exactly `mtp_num_hidden_layers`, almost
-    /// always 1 in published Qwen3.5/3.6 MTP repos). Wrapped in a stub
-    /// until the decoder layer vendor lands.
-    public let layers: [MTPDecoderLayerStub]
+    /// always 1 in published Qwen3.5/3.6 MTP repos).
+    public let layers: [MTPDecoderLayer]
 
     public init(_ config: Qwen35MTPConfiguration) {
         self.config = config
@@ -63,7 +62,7 @@ public final class Qwen35MTPDraftModel: Module {
         self._preFcNormEmbedding.wrappedValue = RMSNorm(dimensions: hidden, eps: eps)
         self._preFcNormHidden.wrappedValue = RMSNorm(dimensions: hidden, eps: eps)
         self._norm.wrappedValue = RMSNorm(dimensions: hidden, eps: eps)
-        self.layers = (0 ..< mtpLayers).map { _ in MTPDecoderLayerStub(textConfig) }
+        self.layers = (0 ..< mtpLayers).map { _ in MTPDecoderLayer(textConfig) }
         super.init()
     }
 
@@ -158,29 +157,3 @@ public final class Qwen35MTPDraftModel: Module {
     }
 }
 
-// MARK: - Stub decoder layer
-
-/// Placeholder for the Qwen3.5/3.6 decoder layer. Final implementation
-/// vendored from mlx-swift-lm's `Qwen35DecoderLayer` in a follow-up
-/// PR (V2 Unit 1b) — see `docs/V2-MTP-DRAFT-PORT.md` "Option A".
-///
-/// Until then the layer instantiates so the model file compiles and
-/// `Qwen35MTPDraftModel(config)` can be sanity-tested for weight
-/// loading, but `callAsFunction` raises if invoked at run time.
-public final class MTPDecoderLayerStub: Module {
-    public init(_ config: Qwen35TextFields) {
-        super.init()
-    }
-
-    public func callAsFunction(
-        _ x: MLXArray,
-        mask: MLXFast.ScaledDotProductAttentionMaskMode = .none,
-        cache: KVCache? = nil,
-        positionIds: MLXArray? = nil
-    ) -> MLXArray {
-        fatalError(
-            "MTPDecoderLayerStub.callAsFunction is not yet implemented — vendor "
-            + "Qwen35DecoderLayer from mlx-swift-lm per docs/V2-MTP-DRAFT-PORT.md."
-        )
-    }
-}
