@@ -34,7 +34,7 @@ import MLXNN
 /// References :
 /// - `Blaizzy/mlx-vlm/mlx_vlm/speculative/drafters/qwen3_5_mtp/qwen3_5_mtp.py`
 /// - `docs/V2-MTP-DRAFT-PORT.md`
-public final class Qwen35MTPDraftModel: Module {
+public final class Qwen35MTPDraftModel: Module, BaseLanguageModel, @unchecked Sendable {
 
     public let config: Qwen35MTPConfiguration
     public let blockSize: Int
@@ -103,7 +103,7 @@ public final class Qwen35MTPDraftModel: Module {
     /// vendored `Qwen35DecoderLayer` already bakes this in. We keep
     /// the explicit add here so the weight tensors load identically
     /// regardless of which layer impl we end up using.
-    public func sanitize(_ weights: [String: MLXArray]) -> [String: MLXArray] {
+    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         var out: [String: MLXArray] = [:]
         var working = weights
 

@@ -24,7 +24,23 @@ public actor ModelRegistry {
         public let ramEstimateBytes: Int64
     }
 
+    /// MTP-draft companions to main models. Drafts have very different
+    /// lifecycle from main models : no tokenizer, no chat session, can't
+    /// be served standalone, only invoked from inside the speculative
+    /// loop when verifying a paired target. We keep them in a separate
+    /// store so they don't pollute `/v1/models` or chat dispatch.
+    public struct LoadedDraft: Sendable {
+        public let id: String
+        public let mainId: String
+        public let model: Qwen35MTPDraftModel
+        public let loadedAt: Date
+        public let ramEstimateBytes: Int64
+    }
+
     private var entries: [String: Loaded] = [:]
+    private var draftEntries: [String: LoadedDraft] = [:]
+    /// `mainId → draftId`. Each main model can have ≤ 1 paired draft.
+    private var pairing: [String: String] = [:]
     private let stateStore: StateStore?
     private let sessionStore: SessionStore?
     private let wiredMemory: WiredMemoryCoordinator?
@@ -49,13 +65,32 @@ public actor ModelRegistry {
     public func contains(_ id: String) -> Bool { entries[id] != nil }
 
     public func usedRamBytes() -> Int64 {
-        entries.values.reduce(0) { $0 + $1.ramEstimateBytes }
+        let mainBytes = entries.values.reduce(0) { $0 + $1.ramEstimateBytes }
+        let draftBytes = draftEntries.values.reduce(0) { $0 + $1.ramEstimateBytes }
+        return mainBytes + draftBytes
     }
 
     public func perModelRamBytes() -> [String: Int64] {
         var out: [String: Int64] = [:]
         for (id, entry) in entries { out[id] = entry.ramEstimateBytes }
+        for (id, entry) in draftEntries { out[id] = entry.ramEstimateBytes }
         return out
+    }
+
+    /// Returns the draft model id paired with `mainId`, if any.
+    public func draftId(for mainId: String) -> String? { pairing[mainId] }
+
+    /// Returns the loaded draft entry for a given draft id (not main id).
+    public func getDraft(_ draftId: String) -> LoadedDraft? { draftEntries[draftId] }
+
+    /// All currently loaded draft models. Excluded from `/v1/models`.
+    public var loadedDrafts: [LoadedDraft] {
+        draftEntries.values.sorted { $0.id < $1.id }
+    }
+
+    /// Pairs currently active.
+    public var activePairs: [(main: String, draft: String)] {
+        pairing.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
     }
 
     // MARK: - Writes
@@ -121,6 +156,56 @@ public actor ModelRegistry {
         return container
     }
 
+    /// Load an MTP draft `draftId` paired with `mainId`. The main model
+    /// must already be loaded (caller's responsibility — typically the
+    /// /admin/load handler loads main first, then draft).
+    ///
+    /// The draft can't be served standalone — it lives only in the
+    /// `draftEntries` map and is invoked by the speculative loop when
+    /// chat completions target `mainId`.
+    @discardableResult
+    public func loadDraft(_ draftId: String, pairedWith mainId: String) async throws -> Qwen35MTPDraftModel {
+        if let existing = draftEntries[draftId] {
+            // Reuse if already loaded. Update the pairing in case the
+            // same draft got attached to a different main (rare).
+            pairing[mainId] = draftId
+            await persistState()
+            return existing.model
+        }
+        guard entries[mainId] != nil else {
+            throw LoadError.loadFailed(
+                underlying: "main model '\(mainId)' not loaded — pair draft after main"
+            )
+        }
+        let neededBytes = RamBudget.estimate(modelId: draftId) ?? 0
+        let usedBytes = usedRamBytes()
+        let ceiling = RamBudget.ceilingBytes()
+        if neededBytes > 0, ceiling > 0, usedBytes + neededBytes > ceiling {
+            throw LoadError.insufficientMemory(
+                neededBytes: neededBytes,
+                availableBytes: max(0, ceiling - usedBytes),
+                ceilingBytes: ceiling,
+                currentlyLoaded: loadedModelIds + draftEntries.keys.sorted()
+            )
+        }
+        let model: Qwen35MTPDraftModel
+        do {
+            model = try MTPModelLoader.load(identifier: draftId)
+        } catch {
+            throw LoadError.loadFailed(underlying: "\(error)")
+        }
+        draftEntries[draftId] = LoadedDraft(
+            id: draftId, mainId: mainId, model: model,
+            loadedAt: Date(), ramEstimateBytes: neededBytes
+        )
+        pairing[mainId] = draftId
+        if neededBytes > 0 {
+            await wiredMemory?.reserveModel(draftId, weightBytes: Int(neededBytes))
+        }
+        await persistState()
+        return model
+    }
+
     /// Stderr diagnostic, gated on `TELEMAK_LOAD_DEBUG` env var. Off by
     /// default so production logs don't fill up. Set the var on the
     /// LaunchAgent plist to capture load timing breakdowns:
@@ -138,20 +223,41 @@ public actor ModelRegistry {
     }
 
     /// Unload one model by id. Returns true if the model was loaded.
-    /// Also drops every session whose cache is bound to this model.
+    /// Drops every session bound to it, the paired draft (if any), and
+    /// any pairing entry. The id can refer to either a main model
+    /// (drops main + paired draft) or a draft directly (drops draft +
+    /// clears the pairing back-reference).
     @discardableResult
     public func unload(_ id: String) async -> Bool {
-        guard entries.removeValue(forKey: id) != nil else { return false }
-        await wiredMemory?.endReservation(id)
-        await sessionStore?.invalidateModel(id)
-        await persistState()
-        return true
+        if entries.removeValue(forKey: id) != nil {
+            await wiredMemory?.endReservation(id)
+            await sessionStore?.invalidateModel(id)
+            // If this main had a paired draft, drop it too.
+            if let draftId = pairing.removeValue(forKey: id) {
+                draftEntries.removeValue(forKey: draftId)
+                await wiredMemory?.endReservation(draftId)
+            }
+            await persistState()
+            return true
+        }
+        if let draft = draftEntries.removeValue(forKey: id) {
+            await wiredMemory?.endReservation(id)
+            // Clear the pairing back-reference so the main no longer
+            // claims to have a draft attached.
+            pairing.removeValue(forKey: draft.mainId)
+            await persistState()
+            return true
+        }
+        return false
     }
 
-    /// Unload everything (admin convenience). Clears all sessions.
+    /// Unload everything (admin convenience). Clears all sessions, all
+    /// drafts, all pairings.
     public func unloadAll() async -> [String] {
-        let ids = Array(entries.keys)
+        let ids = Array(entries.keys) + Array(draftEntries.keys)
         entries.removeAll()
+        draftEntries.removeAll()
+        pairing.removeAll()
         for id in ids {
             await wiredMemory?.endReservation(id)
         }
