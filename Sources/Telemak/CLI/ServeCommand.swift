@@ -65,7 +65,7 @@ struct Serve: AsyncParsableCommand {
         logger.info("replaying persisted state: \(state.loadedModels)")
         for id in state.loadedModels {
             do {
-                _ = try await registry.ensureLoaded(id)
+                _ = try await registry.load(id)
                 logger.info("replayed model: \(id)")
             } catch {
                 logger.warning("failed to replay model \(id): \(error) — continuing")

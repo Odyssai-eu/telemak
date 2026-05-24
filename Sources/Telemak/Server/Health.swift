@@ -17,9 +17,7 @@ struct HealthHandler: Sendable {
 
     private func handle() async throws -> Response {
         let uptime = Date().timeIntervalSince(startTime)
-        let loadedModelIds: [String] = await {
-            if let id = await registry.loadedModelId { return [id] } else { return [] }
-        }()
+        let loadedModelIds = await registry.loadedModelIds
         let (requestsServed, avgTokPerSec) = await stats.snapshot()
 
         let activeBytes = MLX.GPU.activeMemory
