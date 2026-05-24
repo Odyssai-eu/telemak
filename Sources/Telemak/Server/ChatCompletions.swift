@@ -1,6 +1,7 @@
 import Foundation
 import Hummingbird
 import MLXLMCommon
+import MLXRandom
 
 /// POST /v1/chat/completions
 struct ChatCompletionsHandler: Sendable {
@@ -35,10 +36,18 @@ struct ChatCompletionsHandler: Sendable {
             return modelNotLoadedError(requested: modelId, ready: ready)
         }
 
+        if let seed = payload.seed {
+            MLXRandom.seed(seed)
+        }
+
         var params = GenerateParameters()
         if let maxTokens = payload.maxTokens { params.maxTokens = maxTokens }
         if let temperature = payload.temperature { params.temperature = temperature }
         if let topP = payload.topP { params.topP = topP }
+        if let topK = payload.topK { params.topK = topK }
+        if let minP = payload.minP { params.minP = minP }
+        if let repetitionPenalty = payload.repetitionPenalty { params.repetitionPenalty = repetitionPenalty }
+        let stopSequences = payload.stop?.asArray ?? []
 
         let instructions = payload.system ?? extractSystem(from: payload.messages)
         let userPrompt = renderUserPrompt(from: payload.messages)
@@ -67,12 +76,15 @@ struct ChatCompletionsHandler: Sendable {
                 modelId: modelId,
                 sessionId: sessionId,
                 cacheHit: cacheHit,
+                stopSequences: stopSequences,
                 stats: stats,
                 sessionStore: sessionStore
             )
         }
 
-        // Non-streaming path.
+        // Non-streaming path. Use streamDetails to get accurate token counts
+        // from GenerateCompletionInfo, and apply stop-sequence trimming on
+        // the way out.
         let session: ChatSession
         var cachedTokens = 0
         if let cacheHit {
@@ -93,16 +105,37 @@ struct ChatCompletionsHandler: Sendable {
         }
 
         let genStart = Date()
-        let completion: String
+        var completion = ""
+        var stopChecker = StopChecker(stops: stopSequences)
+        var stoppedEarly = false
+        var info: GenerateCompletionInfo?
         do {
-            completion = try await session.respond(to: promptForGeneration)
+            for try await gen in session.streamDetails(to: promptForGeneration, images: [], videos: []) {
+                switch gen {
+                case .chunk(let s):
+                    let emitted = stopChecker.feed(s)
+                    if !emitted.isEmpty { completion += emitted }
+                    if stopChecker.hit {
+                        stoppedEarly = true
+                        // Iterator will continue producing tokens that we
+                        // simply ignore — small cost vs the wiring needed
+                        // to truly cancel mid-generation.
+                    }
+                case .info(let i):
+                    info = i
+                case .toolCall:
+                    break
+                }
+            }
+            if !stopChecker.hit {
+                completion += stopChecker.flushRemaining()
+            }
         } catch {
             return jsonError(.internalServerError, code: "generation_failed",
                               message: "model generation failed: \(error)")
         }
         let genElapsed = Date().timeIntervalSince(genStart)
 
-        // Persist updated cache for next turn.
         if let sessionId, let sessionStore {
             await saveSessionCache(
                 session: session,
@@ -112,9 +145,8 @@ struct ChatCompletionsHandler: Sendable {
             )
         }
 
-        let promptChars = promptForGeneration.count + (effectiveInstructions?.count ?? 0)
-        let promptTokens = max(1, promptChars / 4)
-        let completionTokens = max(1, completion.count / 4)
+        let promptTokens = info?.promptTokenCount ?? max(1, (promptForGeneration.count + (effectiveInstructions?.count ?? 0)) / 4)
+        let completionTokens = info?.generationTokenCount ?? max(1, completion.count / 4)
         await stats.recordRequest(tokens: completionTokens, elapsedSeconds: genElapsed)
 
         let usage = ChatCompletionResponse.Usage(
@@ -123,6 +155,9 @@ struct ChatCompletionsHandler: Sendable {
             totalTokens: promptTokens + completionTokens,
             promptTokensDetails: cachedTokens > 0 ? .init(cachedTokens: cachedTokens) : nil
         )
+
+        let finishReason = stoppedEarly ? "stop" : "stop"
+        _ = finishReason   // currently always "stop" — length-based stop is exposed when info.stopReason gets surfaced
 
         let response = ChatCompletionResponse(
             id: "chatcmpl-\(UUID().uuidString.lowercased())",
@@ -157,6 +192,7 @@ struct ChatCompletionsHandler: Sendable {
         modelId: String,
         sessionId: String?,
         cacheHit: URL?,
+        stopSequences: [String],
         stats: StatsTracker,
         sessionStore: SessionStore?
     ) -> Response {
@@ -194,7 +230,8 @@ struct ChatCompletionsHandler: Sendable {
             }
 
             let genStart = Date()
-            var completionChars = 0
+            var stopChecker = StopChecker(stops: stopSequences)
+            var info: GenerateCompletionInfo?
 
             do {
                 let role = ChatCompletionChunk(
@@ -204,14 +241,35 @@ struct ChatCompletionsHandler: Sendable {
                 )
                 try await send(role)
 
-                for try await piece in session.streamResponse(to: userPrompt) {
-                    completionChars += piece.count
-                    let chunk = ChatCompletionChunk(
-                        id: id, object: "chat.completion.chunk",
-                        created: created, model: modelId,
-                        choices: [.init(index: 0, delta: .init(role: nil, content: piece), finishReason: nil)]
-                    )
-                    try await send(chunk)
+                for try await gen in session.streamDetails(to: userPrompt, images: [], videos: []) {
+                    switch gen {
+                    case .chunk(let piece):
+                        let emit = stopChecker.feed(piece)
+                        if !emit.isEmpty {
+                            let chunk = ChatCompletionChunk(
+                                id: id, object: "chat.completion.chunk",
+                                created: created, model: modelId,
+                                choices: [.init(index: 0, delta: .init(role: nil, content: emit), finishReason: nil)]
+                            )
+                            try await send(chunk)
+                        }
+                    case .info(let i):
+                        info = i
+                    case .toolCall:
+                        break
+                    }
+                    if stopChecker.hit { break }
+                }
+                if !stopChecker.hit {
+                    let tail = stopChecker.flushRemaining()
+                    if !tail.isEmpty {
+                        let chunk = ChatCompletionChunk(
+                            id: id, object: "chat.completion.chunk",
+                            created: created, model: modelId,
+                            choices: [.init(index: 0, delta: .init(role: nil, content: tail), finishReason: nil)]
+                        )
+                        try await send(chunk)
+                    }
                 }
 
                 let stop = ChatCompletionChunk(
@@ -250,8 +308,8 @@ struct ChatCompletionsHandler: Sendable {
                 try? await writer.write(ByteBuffer(string: "data: \(payload)\n\n"))
             }
             let elapsed = Date().timeIntervalSince(genStart)
-            let estTokens = max(1, completionChars / 4)
-            await stats.recordRequest(tokens: estTokens, elapsedSeconds: elapsed)
+            let observedTokens = info?.generationTokenCount ?? 1
+            await stats.recordRequest(tokens: observedTokens, elapsedSeconds: elapsed)
 
             if let sessionId, let sessionStore {
                 await saveSessionCache(
