@@ -14,6 +14,8 @@ func buildApplication(
 ) -> some ApplicationProtocol {
     let router = Router()
 
+    router.add(middleware: CORSMiddleware<BasicRequestContext>())
+    router.add(middleware: BearerAuthMiddleware<BasicRequestContext>())
     router.add(middleware: LogRequestsMiddleware(.info))
 
     HealthHandler(registry: registry, stats: stats, startTime: startTime).add(to: router)

@@ -51,9 +51,72 @@ Ulysse      — memory of the journeys (RAG, future)
 
 ## Status
 
-**Pre-MVP — scaffolding stage.** See [`AGENTS.md`](AGENTS.md) for the runbook to build the V0.
+**V1 — ready for use.** V0 shipped 2026-05-23 (commit `55ec3f6`); V1 (commits `60c9b9f`+) adds multi-model, KV cache reuse, capability contract, Anthropic `/v1/messages`, tool calls, CORS + bearer auth + CLI + menu-bar app.
 
 License : Apache 2.0 (planned, matches the rest of the OdyssAI stack).
+
+## Quick start
+
+```bash
+# Build (requires Metal Toolchain: xcodebuild -downloadComponent MetalToolchain)
+./scripts/build.sh Release
+
+# Run
+TELEMAK_MODELS_DIR=/Volumes/models/odysseus \
+  ./scripts/run.sh serve --host 0.0.0.0 --port 8003
+
+# Load + chat (in another terminal)
+./scripts/run.sh load mlx-community/Qwen3-0.6B-4bit
+./scripts/run.sh chat "Hello" --model mlx-community/Qwen3-0.6B-4bit
+./scripts/run.sh models   # what's available on disk
+./scripts/run.sh unload mlx-community/Qwen3-0.6B-4bit
+```
+
+## CLI subcommands
+
+- `telemak serve` — run the HTTP server (default `127.0.0.1:8003`).
+- `telemak smoke <prompt> --model <id>` — offline load+generate, no server.
+- `telemak models [--server URL]` — list available models on disk.
+- `telemak load <id> [--server URL]` — POST `/admin/load`.
+- `telemak unload <id> | --all [--server URL]` — POST `/admin/unload`.
+- `telemak chat <prompt> --model <id> [--server URL]` — one-shot chat.
+
+## Menu bar app
+
+```bash
+./.xcbuild/Build/Products/Release/telemak-menubar
+```
+
+Shows loaded models, recent tok/s, MLX memory, request count. Polls
+`http://127.0.0.1:8003/health` every 2 s. Right now ships as a SwiftPM
+executable — wrap into an `.app` bundle for Login-Item install:
+
+```bash
+# Wrap into Telemak.app/Contents/MacOS/ (manual; full Xcode-built .app TBD)
+mkdir -p Telemak.app/Contents/MacOS Telemak.app/Contents/Resources
+cp .xcbuild/Build/Products/Release/telemak-menubar Telemak.app/Contents/MacOS/Telemak
+# + write Telemak.app/Contents/Info.plist with LSUIElement=true (menu-bar only).
+```
+
+### First run — Gatekeeper
+
+Telemak isn't notarized (open-source, no Apple Developer ID). First time you double-click the `.app`, macOS will say *"can't be opened because Apple cannot check it for malicious software"*. Workaround:
+
+1. **Right-click** the `.app` → **Open**.
+2. macOS shows the same warning but with an "Open" button. Click it.
+3. Subsequent double-clicks work normally.
+
+This is one-time per machine. The `telemak` CLI binary doesn't trip Gatekeeper (it's not a `.app`).
+
+## Configuration
+
+| Env var | Purpose | Default |
+|---|---|---|
+| `TELEMAK_MODELS_DIR` | Odysseus-style models directory (`<root>/<org>/<name>/snapshots/<hash>/`) | unset → HF cache only |
+| `HF_HUB_CACHE` | HuggingFace cache path | `~/.cache/huggingface/hub/` |
+| `TELEMAK_API_KEY` | Optional bearer token; when set, all endpoints except `/health` and `/.well-known/` require `Authorization: Bearer <key>` | unset → open |
+| `TELEMAK_CORS_ORIGIN` | `Access-Control-Allow-Origin` value | `*` |
+| `TELEMAK_MAX_SESSIONS` | Max KV-cached sessions in memory | `32` |
 
 ## Documentation
 
