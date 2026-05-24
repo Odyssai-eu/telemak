@@ -75,7 +75,7 @@ public enum ModelLoader {
     ///
     /// Idempotent — re-uses an existing staged dir if its config.json is up
     /// to date.
-    private static func prepareConfigForMLX(originalDir: URL, id: String) throws -> URL {
+    static func prepareConfigForMLX(originalDir: URL, id: String) throws -> URL {
         let configURL = originalDir.appendingPathComponent("config.json")
         guard let data = try? Data(contentsOf: configURL),
               var root = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? [String: Any]
@@ -138,7 +138,7 @@ public enum ModelLoader {
 
     /// Resolve `<root>/<id>/snapshots/<hash>/` (or `<root>/<id>/` if no
     /// snapshot dir) into a directory URL that has `config.json`.
-    private static func resolveModelsDir(_ root: String, id: String) -> URL? {
+    static func resolveModelsDir(_ root: String, id: String) -> URL? {
         let base = (root as NSString).appendingPathComponent(id)
         let snapshotsBase = (base as NSString).appendingPathComponent("snapshots")
         let fm = FileManager.default
@@ -158,12 +158,12 @@ public enum ModelLoader {
         return nil
     }
 
-    private static func resolveDirectory(at path: String) -> URL? {
+    static func resolveDirectory(at path: String) -> URL? {
         guard hasConfigJSON(at: path) else { return nil }
         return URL(fileURLWithPath: path)
     }
 
-    private static func hasConfigJSON(at directory: String) -> Bool {
+    static func hasConfigJSON(at directory: String) -> Bool {
         var isDir: ObjCBool = false
         let configPath = (directory as NSString).appendingPathComponent("config.json")
         return FileManager.default.fileExists(atPath: configPath, isDirectory: &isDir) && !isDir.boolValue

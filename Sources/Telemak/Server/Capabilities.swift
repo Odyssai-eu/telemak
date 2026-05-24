@@ -8,7 +8,8 @@ struct CapabilitiesHandler: Sendable {
     let registry: ModelRegistry
 
     /// Telemak engine semantic version — bump on contract changes.
-    static let engineVersion = "0.2.0"
+    /// 0.3.0 = +speculative_decoding capability (V2 MTP support).
+    static let engineVersion = "0.3.0"
 
     func add(to router: Router<BasicRequestContext>) {
         router.get("/.well-known/inference-engine.json") { _, _ async throws -> Response in
@@ -39,6 +40,23 @@ struct CapabilitiesHandler: Sendable {
             }
         }
 
+        struct SpeculativePair: Encodable {
+            let main: String
+            let draft: String
+        }
+
+        struct SpeculativeCapability: Encodable {
+            let supported: Bool
+            let modes: [String]
+            let activePairs: [SpeculativePair]
+
+            enum CodingKeys: String, CodingKey {
+                case supported
+                case modes
+                case activePairs = "active_pairs"
+            }
+        }
+
         struct Capabilities: Encodable {
             let stream: Bool
             let tools: Bool
@@ -47,6 +65,7 @@ struct CapabilitiesHandler: Sendable {
             let sessionCache: Bool
             let openaiCompat: String
             let anthropicCompat: String
+            let speculativeDecoding: SpeculativeCapability
 
             enum CodingKeys: String, CodingKey {
                 case stream
@@ -56,6 +75,7 @@ struct CapabilitiesHandler: Sendable {
                 case sessionCache = "session_cache"
                 case openaiCompat = "openai_compat"
                 case anthropicCompat = "anthropic_compat"
+                case speculativeDecoding = "speculative_decoding"
             }
         }
 
@@ -82,6 +102,17 @@ struct CapabilitiesHandler: Sendable {
         // V1 surface — tools is `true` because Block 4 wires tool-call
         // routing through; Anthropic compat lands in Block 4 too. Both
         // flip to false in the build that ships before Block 4 if needed.
+        // V2 surface — speculative decoding via paired MTP drafters
+        // (Issue #24). The loop is still being wired ; `supported` flips
+        // to `true` once Unit 2 lands, but the API surface
+        // (`/admin/load` `draft_model`) accepts pairs today so the wire
+        // contract stays stable.
+        let pairs = await registry.activePairs.map { SpeculativePair(main: $0.main, draft: $0.draft) }
+        let speculative = SpeculativeCapability(
+            supported: !pairs.isEmpty,
+            modes: ["mtp_adapter"],
+            activePairs: pairs
+        )
         let capabilities = Capabilities(
             stream: true,
             tools: true,
@@ -89,7 +120,8 @@ struct CapabilitiesHandler: Sendable {
             maxContext: 32_768,
             sessionCache: true,
             openaiCompat: "v1",
-            anthropicCompat: "v1"
+            anthropicCompat: "v1",
+            speculativeDecoding: speculative
         )
 
         let payload = Payload(

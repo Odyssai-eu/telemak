@@ -22,6 +22,9 @@ struct ModelsHandler: Sendable {
         router.post("/admin/unload") { request, _ async throws -> Response in
             try await self.unload(request)
         }
+        router.post("/admin/models/split-mtp") { request, _ async throws -> Response in
+            try await self.splitMTP(request)
+        }
     }
 
     // MARK: - GET /v1/models
@@ -94,14 +97,17 @@ struct ModelsHandler: Sendable {
     // MARK: - POST /admin/load
 
     private func load(_ request: Request) async throws -> Response {
-        struct LoadBody: Decodable { let model: String }
+        struct LoadBody: Decodable {
+            let model: String
+            let draft_model: String?
+        }
         let buf = try await request.body.collect(upTo: 1 << 16)
         let body: LoadBody
         do {
             body = try JSONDecoder().decode(LoadBody.self, from: Data(buffer: buf))
         } catch {
             return jsonError(.badRequest, code: "invalid_request_error",
-                              message: "expected {\"model\": \"<id>\"}: \(error)")
+                              message: "expected {\"model\": \"<id>\", \"draft_model\": \"<id?>\"}: \(error)")
         }
         do {
             _ = try await registry.load(body.model)
@@ -119,7 +125,29 @@ struct ModelsHandler: Sendable {
             return jsonError(.serviceUnavailable, code: "model_load_failed",
                               message: "could not load model '\(body.model)': \(error)")
         }
-        let payload: [String: String] = ["status": "loaded", "model": body.model]
+        // Optional draft pairing for MTP speculative decoding (V2).
+        if let draftId = body.draft_model, !draftId.isEmpty {
+            do {
+                _ = try await registry.loadDraft(draftId, pairedWith: body.model)
+            } catch ModelRegistry.LoadError.insufficientMemory(let needed, let available, let ceiling, let currentlyLoaded) {
+                return insufficientMemoryError(
+                    neededBytes: needed,
+                    availableBytes: available,
+                    ceilingBytes: ceiling,
+                    currentlyLoaded: currentlyLoaded
+                )
+            } catch ModelRegistry.LoadError.loadFailed(let why) {
+                return jsonError(.serviceUnavailable, code: "draft_load_failed",
+                                  message: "main loaded but draft '\(draftId)' failed: \(why)")
+            } catch {
+                return jsonError(.serviceUnavailable, code: "draft_load_failed",
+                                  message: "main loaded but draft '\(draftId)' failed: \(error)")
+            }
+        }
+        var payload: [String: String] = ["status": "loaded", "model": body.model]
+        if let draftId = body.draft_model, !draftId.isEmpty {
+            payload["draft_model"] = draftId
+        }
         let data = try JSONEncoder().encode(payload)
         return jsonResponse(.ok, data: data)
     }
@@ -151,6 +179,91 @@ struct ModelsHandler: Sendable {
             "model": modelId,
         ]
         let data = try JSONSerialization.data(withJSONObject: payload)
+        return jsonResponse(.ok, data: data)
+    }
+
+    // MARK: - POST /admin/models/split-mtp
+
+    /// Wraps Blaizzy's `mlx_vlm.speculative.drafters.qwen3_5_mtp.split`
+    /// CLI as an admin endpoint. Lets a Telemak operator pop an MTP
+    /// drafter out of any Qwen3.5 / Qwen3.6 source from the dashboard
+    /// instead of hand-running Python on the host.
+    ///
+    /// Body : `{"source": "<hf-id or path>", "output": "<local path>"}`.
+    /// Prereq on the host : `pip install mlx-vlm` — the endpoint
+    /// surfaces a clear 503 if the Python module isn't importable.
+    private func splitMTP(_ request: Request) async throws -> Response {
+        struct SplitBody: Decodable {
+            let source: String
+            let output: String?
+        }
+        let buf = try await request.body.collect(upTo: 1 << 16)
+        let body: SplitBody
+        do {
+            body = try JSONDecoder().decode(SplitBody.self, from: Data(buffer: buf))
+        } catch {
+            return jsonError(
+                .badRequest, code: "invalid_request_error",
+                message: "expected {\"source\": \"<id>\", \"output\": \"<path?>\"}: \(error)")
+        }
+        let pythonBin = ProcessInfo.processInfo.environment["TELEMAK_PYTHON"]
+            ?? "/usr/bin/env"
+        let module = "mlx_vlm.speculative.drafters.qwen3_5_mtp.split"
+        var args: [String]
+        if pythonBin.hasSuffix("env") {
+            args = ["python3", "-m", module, body.source]
+        } else {
+            args = ["-m", module, body.source]
+        }
+        if let out = body.output, !out.isEmpty {
+            args.append(contentsOf: ["--output", out])
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: pythonBin)
+        process.arguments = args
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = errPipe
+        do {
+            try process.run()
+        } catch {
+            return jsonError(
+                .serviceUnavailable, code: "split_failed",
+                message:
+                    "could not spawn '\(pythonBin) \(args.joined(separator: " "))': \(error). "
+                    + "Install mlx-vlm on the host (`pip install mlx-vlm`) or point "
+                    + "TELEMAK_PYTHON at a venv that has it.")
+        }
+        process.waitUntilExit()
+        let stdoutData = outPipe.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+        let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+        if process.terminationStatus != 0 {
+            let payload: [String: Any] = [
+                "error": [
+                    "type": "split_failed",
+                    "code": "split_failed",
+                    "exit_code": Int(process.terminationStatus),
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "command": ([pythonBin] + args).joined(separator: " "),
+                ]
+            ]
+            let data =
+                (try? JSONSerialization.data(withJSONObject: payload)) ?? Data("{}".utf8)
+            return jsonResponse(.serviceUnavailable, data: data)
+        }
+        let payload: [String: Any] = [
+            "status": "ok",
+            "source": body.source,
+            "output": body.output ?? "(default)",
+            "stdout": stdout,
+            "stderr": stderr,
+        ]
+        let data =
+            (try? JSONSerialization.data(withJSONObject: payload)) ?? Data("{}".utf8)
         return jsonResponse(.ok, data: data)
     }
 
