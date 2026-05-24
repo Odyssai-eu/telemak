@@ -84,19 +84,20 @@ TELEMAK_MODELS_DIR=/Volumes/models/odysseus \
 ## Menu bar app
 
 ```bash
-./.xcbuild/Build/Products/Release/telemak-menubar
+./scripts/build.sh Release
+./scripts/build-menubar-app.sh Release   # wraps into dist/Telemak.app
+open dist/Telemak.app                     # first launch — see Gatekeeper below
 ```
 
-Shows loaded models, recent tok/s, MLX memory, request count. Polls
-`http://127.0.0.1:8003/health` every 2 s. Right now ships as a SwiftPM
-executable — wrap into an `.app` bundle for Login-Item install:
+A SwiftUI `MenuBarExtra` app. Click the status icon to:
 
-```bash
-# Wrap into Telemak.app/Contents/MacOS/ (manual; full Xcode-built .app TBD)
-mkdir -p Telemak.app/Contents/MacOS Telemak.app/Contents/Resources
-cp .xcbuild/Build/Products/Release/telemak-menubar Telemak.app/Contents/MacOS/Telemak
-# + write Telemak.app/Contents/Info.plist with LSUIElement=true (menu-bar only).
-```
+- See **status** (running / stopped / unreachable), **loaded models**, **recent tok/s**, **request count**, **MLX wired memory**, **uptime**.
+- **Start / Stop / Restart** the local `telemak serve` LaunchAgent (`eu.odyssai.telemak`). Disabled when the endpoint is remote — start/stop only controls the local agent.
+- **Open Dashboard** — launches the configured URL in your browser (default: Odysseus dashboard at `http://192.168.86.141:8000/`).
+- **Settings** — change the endpoint URL, dashboard URL, and poll interval (persisted in `defaults` under `eu.odyssai.telemak.menubar`).
+- **Quit** — terminate the menu-bar app (telemak serve itself keeps running via launchd).
+
+Install: drag `dist/Telemak.app` to `/Applications`. To auto-launch at login: System Settings → General → Login Items → `+` → pick Telemak.
 
 ### First run — Gatekeeper
 
