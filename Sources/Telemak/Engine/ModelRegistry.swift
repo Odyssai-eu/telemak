@@ -67,17 +67,19 @@ public actor ModelRegistry {
     /// `unload` first.
     @discardableResult
     public func load(_ id: String) async throws -> ModelContainer {
+        Self.dbg("entry id=\(id)")
         if let existing = entries[id] {
+            Self.dbg("hit id=\(id)")
             return existing.container
         }
 
+        Self.dbg("estimate start id=\(id)")
+        let estimateStart = Date()
         let neededBytes = RamBudget.estimate(modelId: id) ?? 0
+        Self.dbg("estimate done id=\(id) bytes=\(neededBytes) took=\(Date().timeIntervalSince(estimateStart))s")
         let usedBytes = usedRamBytes()
         let ceiling = RamBudget.ceilingBytes()
 
-        // If we couldn't estimate (model not in any known dir), let the
-        // loader try anyway — it'll fail with a clearer error. We only
-        // refuse when we DO have an estimate that exceeds the ceiling.
         if neededBytes > 0, ceiling > 0, usedBytes + neededBytes > ceiling {
             throw LoadError.insufficientMemory(
                 neededBytes: neededBytes,
@@ -87,12 +89,16 @@ public actor ModelRegistry {
             )
         }
 
+        Self.dbg("before await ModelLoader.load id=\(id)")
+        let loadStart = Date()
         let container: ModelContainer
         do {
             container = try await ModelLoader.load(identifier: id)
         } catch {
+            Self.dbg("ModelLoader.load THREW id=\(id) error=\(error)")
             throw LoadError.loadFailed(underlying: "\(error)")
         }
+        Self.dbg("after await ModelLoader.load id=\(id) took=\(Date().timeIntervalSince(loadStart))s")
 
         let loaded = Loaded(
             id: id, container: container,
@@ -100,8 +106,26 @@ public actor ModelRegistry {
             ramEstimateBytes: neededBytes
         )
         entries[id] = loaded
+        Self.dbg("entries updated id=\(id)")
         await persistState()
+        Self.dbg("persistState done id=\(id) total_wall=\(Date().timeIntervalSince(estimateStart))s")
         return container
+    }
+
+    /// Stderr diagnostic, gated on `TELEMAK_LOAD_DEBUG` env var. Off by
+    /// default so production logs don't fill up. Set the var on the
+    /// LaunchAgent plist to capture load timing breakdowns:
+    ///
+    ///   <key>TELEMAK_LOAD_DEBUG</key><string>1</string>
+    ///
+    /// Output format: `[telemak.mrl] <step> id=<model> [took=<seconds>s]`.
+    private static let loadDebugEnabled: Bool = {
+        !(ProcessInfo.processInfo.environment["TELEMAK_LOAD_DEBUG"] ?? "").isEmpty
+    }()
+
+    private static func dbg(_ msg: String) {
+        guard loadDebugEnabled else { return }
+        FileHandle.standardError.write(Data("[telemak.mrl] \(msg)\n".utf8))
     }
 
     /// Unload one model by id. Returns true if the model was loaded.
