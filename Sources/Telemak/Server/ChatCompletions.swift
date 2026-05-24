@@ -131,15 +131,22 @@ struct ChatCompletionsHandler: Sendable {
                 let role = ChatCompletionChunk(
                     id: id, object: "chat.completion.chunk",
                     created: created, model: modelId,
-                    choices: [.init(index: 0, delta: .init(role: "assistant", content: nil), finishReason: nil)]
+                    choices: [.init(index: 0, delta: .init(role: "assistant", content: nil), finishReason: nil)],
+                    usage: nil
                 )
                 try await send(role)
 
+                // Track completion chars to estimate completion tokens at end.
+                // Same heuristic as the non-stream path: chars / 4 ≈ tokens.
+                var completionChars = 0
+
                 for try await piece in session.streamResponse(to: userPrompt) {
+                    completionChars += piece.count
                     let chunk = ChatCompletionChunk(
                         id: id, object: "chat.completion.chunk",
                         created: created, model: modelId,
-                        choices: [.init(index: 0, delta: .init(role: nil, content: piece), finishReason: nil)]
+                        choices: [.init(index: 0, delta: .init(role: nil, content: piece), finishReason: nil)],
+                        usage: nil
                     )
                     try await send(chunk)
                 }
@@ -147,9 +154,28 @@ struct ChatCompletionsHandler: Sendable {
                 let stop = ChatCompletionChunk(
                     id: id, object: "chat.completion.chunk",
                     created: created, model: modelId,
-                    choices: [.init(index: 0, delta: .init(role: nil, content: nil), finishReason: "stop")]
+                    choices: [.init(index: 0, delta: .init(role: nil, content: nil), finishReason: "stop")],
+                    usage: nil
                 )
                 try await send(stop)
+
+                // OpenAI-compatible usage final chunk (per stream_options.include_usage).
+                // Choices is intentionally empty; usage carries the token counts so
+                // clients can compute tok/s without a separate non-stream call.
+                let promptChars = userPrompt.count + (instructions?.count ?? 0)
+                let promptTokens = max(1, promptChars / 4)
+                let completionTokens = max(1, completionChars / 4)
+                let usageChunk = ChatCompletionChunk(
+                    id: id, object: "chat.completion.chunk",
+                    created: created, model: modelId,
+                    choices: [],
+                    usage: .init(
+                        promptTokens: promptTokens,
+                        completionTokens: completionTokens,
+                        totalTokens: promptTokens + completionTokens
+                    )
+                )
+                try await send(usageChunk)
 
                 try await writer.write(ByteBuffer(string: "data: [DONE]\n\n"))
             } catch {

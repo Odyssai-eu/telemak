@@ -64,12 +64,18 @@ struct ChatCompletionResponse: Codable, Sendable {
 }
 
 /// OpenAI-compatible streaming chunk.
+///
+/// Optional `usage` is populated only on the final chunk per the OpenAI
+/// `stream_options.include_usage: true` convention. Telemak always emits it
+/// because the cost of one extra JSON object at end-of-stream is negligible
+/// and clients that don't expect it just ignore the field.
 struct ChatCompletionChunk: Codable, Sendable {
     var id: String
     var object: String        // "chat.completion.chunk"
     var created: Int
     var model: String
     var choices: [Choice]
+    var usage: ChatCompletionResponse.Usage?
 
     struct Choice: Codable, Sendable {
         var index: Int
