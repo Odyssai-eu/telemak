@@ -116,6 +116,11 @@ struct ChatCompletionsHandler: Sendable {
                     tools: toolSpecs
                 )
             } catch {
+                // Cache file unreadable / format mismatch — fall back to a
+                // fresh session and full prefill. Surface the underlying
+                // error to the LaunchAgent's stderr log so operators can
+                // see if cache corruption is happening repeatedly.
+                FileHandle.standardError.write(Data("[telemak.kv] loadPromptCache failed for \(cacheHit.lastPathComponent): \(error)\n".utf8))
                 session = ChatSession(
                     container, instructions: instructions,
                     generateParameters: params,
@@ -406,7 +411,14 @@ struct ChatCompletionsHandler: Sendable {
                 cacheURL: url,
                 byteSize: size
             )
+        } catch ChatSessionError.noCacheAvailable {
+            // No cache to save (empty generation, tool-only response, etc.).
+            // Not an error — just skip persistence.
+            try? FileManager.default.removeItem(at: url)
         } catch {
+            // Genuinely unexpected: log so operators can see if disk is full,
+            // permissions broke, etc. Don't fail the response.
+            FileHandle.standardError.write(Data("[telemak.kv] saveCache failed for session \(sessionId): \(error)\n".utf8))
             try? FileManager.default.removeItem(at: url)
         }
     }
