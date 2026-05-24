@@ -12,6 +12,7 @@ struct ChatCompletionRequest: Codable, Sendable {
     var topP: Float?
     var stream: Bool?
     var system: String?
+    var sessionId: String?
 
     enum CodingKeys: String, CodingKey {
         case model
@@ -21,6 +22,7 @@ struct ChatCompletionRequest: Codable, Sendable {
         case topP = "top_p"
         case stream
         case system
+        case sessionId = "session_id"
     }
 }
 
@@ -54,11 +56,21 @@ struct ChatCompletionResponse: Codable, Sendable {
         var promptTokens: Int
         var completionTokens: Int
         var totalTokens: Int
+        var promptTokensDetails: PromptTokensDetails?
 
         enum CodingKeys: String, CodingKey {
             case promptTokens = "prompt_tokens"
             case completionTokens = "completion_tokens"
             case totalTokens = "total_tokens"
+            case promptTokensDetails = "prompt_tokens_details"
+        }
+    }
+
+    struct PromptTokensDetails: Codable, Sendable {
+        var cachedTokens: Int
+
+        enum CodingKeys: String, CodingKey {
+            case cachedTokens = "cached_tokens"
         }
     }
 }

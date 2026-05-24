@@ -26,9 +26,11 @@ public actor ModelRegistry {
 
     private var entries: [String: Loaded] = [:]
     private let stateStore: StateStore?
+    private let sessionStore: SessionStore?
 
-    public init(stateStore: StateStore? = nil) {
+    public init(stateStore: StateStore? = nil, sessionStore: SessionStore? = nil) {
         self.stateStore = stateStore
+        self.sessionStore = sessionStore
     }
 
     // MARK: - Reads
@@ -103,17 +105,20 @@ public actor ModelRegistry {
     }
 
     /// Unload one model by id. Returns true if the model was loaded.
+    /// Also drops every session whose cache is bound to this model.
     @discardableResult
     public func unload(_ id: String) async -> Bool {
         guard entries.removeValue(forKey: id) != nil else { return false }
+        await sessionStore?.invalidateModel(id)
         await persistState()
         return true
     }
 
-    /// Unload everything (admin convenience).
+    /// Unload everything (admin convenience). Clears all sessions.
     public func unloadAll() async -> [String] {
         let ids = Array(entries.keys)
         entries.removeAll()
+        _ = await sessionStore?.clearAll()
         await persistState()
         return ids
     }
