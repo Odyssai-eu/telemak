@@ -49,6 +49,20 @@ struct ChatCompletionsHandler: Sendable {
         if let repetitionPenalty = payload.repetitionPenalty { params.repetitionPenalty = repetitionPenalty }
         let stopSequences = payload.stop?.asArray ?? []
 
+        let toolSpecs: [[String: any Sendable]]? = payload.tools.map { values in
+            values.compactMap { value in
+                if case .object(let dict) = value {
+                    return dict.mapValues { $0.toSendable() }
+                }
+                return nil
+            }
+        }
+
+        var additionalContext: [String: any Sendable]? = nil
+        if let enableThinking = payload.enableThinking {
+            additionalContext = ["enable_thinking": enableThinking]
+        }
+
         let instructions = payload.system ?? extractSystem(from: payload.messages)
         let userPrompt = renderUserPrompt(from: payload.messages)
         if userPrompt.isEmpty {
@@ -77,6 +91,8 @@ struct ChatCompletionsHandler: Sendable {
                 sessionId: sessionId,
                 cacheHit: cacheHit,
                 stopSequences: stopSequences,
+                toolSpecs: toolSpecs,
+                additionalContext: additionalContext,
                 stats: stats,
                 sessionStore: sessionStore
             )
@@ -95,13 +111,23 @@ struct ChatCompletionsHandler: Sendable {
                     container,
                     instructions: nil,
                     cache: loaded,
-                    generateParameters: params
+                    generateParameters: params,
+                    additionalContext: additionalContext,
+                    tools: toolSpecs
                 )
             } catch {
-                session = ChatSession(container, instructions: instructions, generateParameters: params)
+                session = ChatSession(
+                    container, instructions: instructions,
+                    generateParameters: params,
+                    additionalContext: additionalContext, tools: toolSpecs
+                )
             }
         } else {
-            session = ChatSession(container, instructions: instructions, generateParameters: params)
+            session = ChatSession(
+                container, instructions: instructions,
+                generateParameters: params,
+                additionalContext: additionalContext, tools: toolSpecs
+            )
         }
 
         let genStart = Date()
@@ -109,6 +135,7 @@ struct ChatCompletionsHandler: Sendable {
         var stopChecker = StopChecker(stops: stopSequences)
         var stoppedEarly = false
         var info: GenerateCompletionInfo?
+        var collectedToolCalls: [ChatToolCall] = []
         do {
             for try await gen in session.streamDetails(to: promptForGeneration, images: [], videos: []) {
                 switch gen {
@@ -117,14 +144,11 @@ struct ChatCompletionsHandler: Sendable {
                     if !emitted.isEmpty { completion += emitted }
                     if stopChecker.hit {
                         stoppedEarly = true
-                        // Iterator will continue producing tokens that we
-                        // simply ignore — small cost vs the wiring needed
-                        // to truly cancel mid-generation.
                     }
                 case .info(let i):
                     info = i
-                case .toolCall:
-                    break
+                case .toolCall(let call):
+                    collectedToolCalls.append(toolCallToChat(call))
                 }
             }
             if !stopChecker.hit {
@@ -156,8 +180,8 @@ struct ChatCompletionsHandler: Sendable {
             promptTokensDetails: cachedTokens > 0 ? .init(cachedTokens: cachedTokens) : nil
         )
 
-        let finishReason = stoppedEarly ? "stop" : "stop"
-        _ = finishReason   // currently always "stop" — length-based stop is exposed when info.stopReason gets surfaced
+        let _ = stoppedEarly
+        let finishReason = collectedToolCalls.isEmpty ? "stop" : "tool_calls"
 
         let response = ChatCompletionResponse(
             id: "chatcmpl-\(UUID().uuidString.lowercased())",
@@ -167,8 +191,12 @@ struct ChatCompletionsHandler: Sendable {
             choices: [
                 .init(
                     index: 0,
-                    message: ChatMessage(role: "assistant", content: completion),
-                    finishReason: "stop"
+                    message: ChatMessage(
+                        role: "assistant",
+                        content: collectedToolCalls.isEmpty ? completion : (completion.isEmpty ? nil : completion),
+                        toolCalls: collectedToolCalls.isEmpty ? nil : collectedToolCalls
+                    ),
+                    finishReason: finishReason
                 )
             ],
             usage: usage
@@ -193,6 +221,8 @@ struct ChatCompletionsHandler: Sendable {
         sessionId: String?,
         cacheHit: URL?,
         stopSequences: [String],
+        toolSpecs: [[String: any Sendable]]?,
+        additionalContext: [String: any Sendable]?,
         stats: StatsTracker,
         sessionStore: SessionStore?
     ) -> Response {
@@ -208,16 +238,23 @@ struct ChatCompletionsHandler: Sendable {
                     let (loaded, _) = try loadPromptCache(url: cacheHit)
                     cachedTokens = loaded.first?.offset ?? 0
                     session = ChatSession(
-                        container,
-                        instructions: nil,
-                        cache: loaded,
-                        generateParameters: params
+                        container, instructions: nil, cache: loaded,
+                        generateParameters: params,
+                        additionalContext: additionalContext, tools: toolSpecs
                     )
                 } catch {
-                    session = ChatSession(container, instructions: instructions, generateParameters: params)
+                    session = ChatSession(
+                        container, instructions: instructions,
+                        generateParameters: params,
+                        additionalContext: additionalContext, tools: toolSpecs
+                    )
                 }
             } else {
-                session = ChatSession(container, instructions: instructions, generateParameters: params)
+                session = ChatSession(
+                    container, instructions: instructions,
+                    generateParameters: params,
+                    additionalContext: additionalContext, tools: toolSpecs
+                )
             }
 
             func send(_ chunk: ChatCompletionChunk) async throws {
@@ -232,6 +269,7 @@ struct ChatCompletionsHandler: Sendable {
             let genStart = Date()
             var stopChecker = StopChecker(stops: stopSequences)
             var info: GenerateCompletionInfo?
+            var anyToolCalls = false
 
             do {
                 let role = ChatCompletionChunk(
@@ -255,8 +293,19 @@ struct ChatCompletionsHandler: Sendable {
                         }
                     case .info(let i):
                         info = i
-                    case .toolCall:
-                        break
+                    case .toolCall(let call):
+                        anyToolCalls = true
+                        let chatCall = self.toolCallToChat(call)
+                        let chunk = ChatCompletionChunk(
+                            id: id, object: "chat.completion.chunk",
+                            created: created, model: modelId,
+                            choices: [.init(
+                                index: 0,
+                                delta: .init(role: nil, content: nil, toolCalls: [chatCall]),
+                                finishReason: nil
+                            )]
+                        )
+                        try await send(chunk)
                     }
                     if stopChecker.hit { break }
                 }
@@ -272,10 +321,11 @@ struct ChatCompletionsHandler: Sendable {
                     }
                 }
 
+                let finishReason = anyToolCalls ? "tool_calls" : "stop"
                 let stop = ChatCompletionChunk(
                     id: id, object: "chat.completion.chunk",
                     created: created, model: modelId,
-                    choices: [.init(index: 0, delta: .init(role: nil, content: nil), finishReason: "stop")]
+                    choices: [.init(index: 0, delta: .init(role: nil, content: nil), finishReason: finishReason)]
                 )
                 try await send(stop)
 
@@ -361,25 +411,48 @@ struct ChatCompletionsHandler: Sendable {
         }
     }
 
+    /// Convert mlx-swift-lm's `ToolCall` (`{function: {name, arguments:
+    /// [String: JSONValue]}}`) to the OpenAI wire shape
+    /// (`{id, type:"function", function:{name, arguments:"<json-string>"}}`).
+    private func toolCallToChat(_ call: ToolCall) -> ChatToolCall {
+        // `function.arguments` is `[String: MLXLMCommon.JSONValue]`, which is
+        // mlx-swift-lm's local JSONValue (not ours). Serialize via its
+        // `anyValue` representation.
+        let argsAny = call.function.arguments.mapValues { $0.anyValue }
+        let argsString: String
+        if let data = try? JSONSerialization.data(withJSONObject: argsAny),
+           let s = String(data: data, encoding: .utf8) {
+            argsString = s
+        } else {
+            argsString = "{}"
+        }
+        return ChatToolCall(
+            id: "call_\(UUID().uuidString.lowercased().prefix(24))",
+            type: "function",
+            function: ChatToolCallFunction(name: call.function.name, arguments: argsString)
+        )
+    }
+
     private func lastUserMessageOnly(_ messages: [ChatMessage]) -> String {
         if let last = messages.reversed().first(where: { $0.role == "user" }) {
-            return last.content
+            return last.content ?? ""
         }
         return ""
     }
 
     private func extractSystem(from messages: [ChatMessage]) -> String? {
-        let systemParts = messages.filter { $0.role == "system" }.map(\.content)
+        let systemParts = messages.filter { $0.role == "system" }.compactMap(\.content)
         return systemParts.isEmpty ? nil : systemParts.joined(separator: "\n\n")
     }
 
     private func renderUserPrompt(from messages: [ChatMessage]) -> String {
         let nonSystem = messages.filter { $0.role != "system" }
         if nonSystem.count == 1, nonSystem[0].role == "user" {
-            return nonSystem[0].content
+            return nonSystem[0].content ?? ""
         }
         return nonSystem.map { msg in
-            msg.role == "user" ? msg.content : "[\(msg.role)] \(msg.content)"
+            let body = msg.content ?? ""
+            return msg.role == "user" ? body : "[\(msg.role)] \(body)"
         }.joined(separator: "\n\n")
     }
 

@@ -18,6 +18,10 @@ struct ChatCompletionRequest: Codable, Sendable {
     var stream: Bool?
     var system: String?
     var sessionId: String?
+    var enableThinking: Bool?
+    /// OpenAI tool array. We accept any JSON, pass through to mlx-swift-lm.
+    var tools: [JSONValue]?
+    var toolChoice: JSONValue?
 
     enum CodingKeys: String, CodingKey {
         case model
@@ -33,6 +37,63 @@ struct ChatCompletionRequest: Codable, Sendable {
         case stream
         case system
         case sessionId = "session_id"
+        case enableThinking = "enable_thinking"
+        case tools
+        case toolChoice = "tool_choice"
+    }
+}
+
+/// Tagged JSON value — used to pass through opaque OpenAI fields like `tools`
+/// without losing the structure. mlx-swift-lm's `ToolSpec` is just
+/// `[String: any Sendable]` so we round-trip via this.
+enum JSONValue: Codable, Sendable {
+    case null
+    case bool(Bool)
+    case int(Int)
+    case double(Double)
+    case string(String)
+    case array([JSONValue])
+    case object([String: JSONValue])
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() { self = .null; return }
+        if let b = try? container.decode(Bool.self) { self = .bool(b); return }
+        if let i = try? container.decode(Int.self) { self = .int(i); return }
+        if let d = try? container.decode(Double.self) { self = .double(d); return }
+        if let s = try? container.decode(String.self) { self = .string(s); return }
+        if let a = try? container.decode([JSONValue].self) { self = .array(a); return }
+        if let o = try? container.decode([String: JSONValue].self) { self = .object(o); return }
+        throw DecodingError.dataCorruptedError(
+            in: container, debugDescription: "unknown JSON value"
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .null: try container.encodeNil()
+        case .bool(let b): try container.encode(b)
+        case .int(let i): try container.encode(i)
+        case .double(let d): try container.encode(d)
+        case .string(let s): try container.encode(s)
+        case .array(let a): try container.encode(a)
+        case .object(let o): try container.encode(o)
+        }
+    }
+
+    /// Unwrap into an `any Sendable` for mlx-swift-lm's ToolSpec/dispatch
+    /// dictionaries (which are `[String: any Sendable]`).
+    func toSendable() -> any Sendable {
+        switch self {
+        case .null: return NSNull()
+        case .bool(let b): return b
+        case .int(let i): return i
+        case .double(let d): return d
+        case .string(let s): return s
+        case .array(let a): return a.map { $0.toSendable() }
+        case .object(let o): return o.mapValues { $0.toSendable() }
+        }
     }
 }
 
@@ -75,7 +136,36 @@ enum StopSequence: Codable, Sendable {
 
 struct ChatMessage: Codable, Sendable {
     var role: String
-    var content: String
+    var content: String?
+    var toolCalls: [ChatToolCall]?
+
+    enum CodingKeys: String, CodingKey {
+        case role
+        case content
+        case toolCalls = "tool_calls"
+    }
+
+    init(role: String, content: String?, toolCalls: [ChatToolCall]? = nil) {
+        self.role = role
+        self.content = content
+        self.toolCalls = toolCalls
+    }
+}
+
+struct ChatToolCall: Codable, Sendable {
+    var id: String
+    var type: String
+    var function: ChatToolCallFunction
+
+    struct Encoder {
+        // placeholder to keep the struct namespace
+    }
+}
+
+struct ChatToolCallFunction: Codable, Sendable {
+    var name: String
+    /// OpenAI emits arguments as a JSON-encoded string, not a structured object.
+    var arguments: String
 }
 
 /// OpenAI-compatible non-streamed response.
@@ -145,5 +235,12 @@ struct ChatCompletionChunk: Codable, Sendable {
     struct Delta: Codable, Sendable {
         var role: String?
         var content: String?
+        var toolCalls: [ChatToolCall]?
+
+        enum CodingKeys: String, CodingKey {
+            case role
+            case content
+            case toolCalls = "tool_calls"
+        }
     }
 }
