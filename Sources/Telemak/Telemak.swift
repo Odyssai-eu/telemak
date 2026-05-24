@@ -1,6 +1,6 @@
 import ArgumentParser
 
-let telemakVersion = "0.1.0"
+let telemakVersion = "0.2.0"
 
 @main
 struct Telemak: AsyncParsableCommand {
@@ -8,7 +8,14 @@ struct Telemak: AsyncParsableCommand {
         commandName: "telemak",
         abstract: "Native macOS HTTP runtime for MLX inference.",
         version: telemakVersion,
-        subcommands: [Serve.self, Smoke.self],
+        subcommands: [
+            Serve.self,
+            Smoke.self,
+            ModelsCommand.self,
+            LoadCommand.self,
+            UnloadCommand.self,
+            ChatCommand.self,
+        ],
         defaultSubcommand: Serve.self
     )
 }

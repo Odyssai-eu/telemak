@@ -8,6 +8,7 @@ let package = Package(
     ],
     products: [
         .executable(name: "telemak", targets: ["Telemak"]),
+        .executable(name: "telemak-menubar", targets: ["TelemakMenuBar"]),
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift-lm", from: "3.31.3"),
@@ -30,6 +31,10 @@ let package = Package(
                 .product(name: "HuggingFace", package: "swift-huggingface"),
                 .product(name: "Tokenizers", package: "swift-transformers"),
             ]
+        ),
+        .executableTarget(
+            name: "TelemakMenuBar",
+            dependencies: []
         ),
         .testTarget(
             name: "TelemakTests",

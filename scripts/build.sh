@@ -11,7 +11,7 @@ DERIVED="${ROOT}/.xcbuild"
 cd "$ROOT"
 
 xcodebuild \
-  -scheme Telemak \
+  -scheme Telemak-Package \
   -configuration "$CONFIGURATION" \
   -derivedDataPath "$DERIVED" \
   -destination 'platform=macOS' \
@@ -26,4 +26,9 @@ if [ -x "$BINARY" ]; then
 else
   echo "✗ build failed (no binary at $BINARY)" >&2
   exit 1
+fi
+
+MENUBAR="$DERIVED/Build/Products/$CONFIGURATION/telemak-menubar"
+if [ -x "$MENUBAR" ]; then
+  echo "✓ built $MENUBAR"
 fi
