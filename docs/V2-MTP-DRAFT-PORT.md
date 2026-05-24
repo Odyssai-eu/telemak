@@ -1,39 +1,91 @@
 # Telemak V2 — Port `qwen3_5_mtp` draft architecture
 
-> Goal : enable **MTP speculative decoding** in Telemak so Qwen3.6-35B-A3B
-> serves at ~76 tok/s instead of ~47 tok/s on max-64 (1.6× speedup
-> demonstrated by Inferencer.app on the same model with the same draft
-> repo).
+> **Goal** : enable **MTP speculative decoding** in Telemak so
+> Qwen3.6-35B-A3B serves at ~76 tok/s instead of ~47 tok/s on max-64
+> (1.6× speedup demonstrated by Inferencer.app on the same model
+> with the same draft repo).
 >
-> Pick this up **after V1 is shipped** (the multi-model + KV cache work in
-> [V1-TODO.md](V1-TODO.md) finishes first; V2 builds on the
-> SpeculativeTokenIterator wiring that V1's classic-spec exploration may
-> already touch).
+> Pick this up **after V1 is shipped** (multi-model UI + KV cache work
+> already landed in V1 ; the `SpeculativeTokenIterator` wiring V1's
+> classic-spec exploration touched is reused for V2).
 
-## Background — what we know
+## Status — blocker LIFTED 2026-05-24
 
-The MTP draft is **not** a standalone LanguageModel — it's an adapter
-that piggybacks on the main model's embeddings. Recon done 2026-05-24
-on these HF repos :
+Earlier note (2026-05-24 morning agent session) claimed V2 was blocked
+by `Qwen35DecoderLayer` / `Qwen35Attention` / `Qwen35SparseMoeBlock`
+being `final class` non-public in mlx-swift-lm. That analysis was
+incomplete : **there's an MIT-licensed, MLX-native reference
+implementation in Python** that covers the entire stack. Porting
+Python → Swift is straightforward since the MLX APIs are nearly 1:1
+across the two language bindings.
 
-- Main model : [`inferencerlabs/Qwen3.6-35B-A3B-MLX-9bit`](https://huggingface.co/inferencerlabs/Qwen3.6-35B-A3B-MLX-9bit) — standard mlx-swift-lm-loadable Qwen3.5MoE arch
-- Draft model : [`inferencerlabs/Qwen3.6-35B-A3B-MTP-MLX-9bit`](https://huggingface.co/inferencerlabs/Qwen3.6-35B-A3B-MTP-MLX-9bit) — 906 MB, **architecture `qwen3_5_mtp` not registered in mlx-swift-lm**
+The new plan is the "Inferencer route" — port the Python reference to
+Swift and own the model layer end-to-end. Independence from
+mlx-swift-lm's visibility constraints on the affected classes.
 
-Inferencer.app loads both together and uses `SpeculativeTokenIterator`
-under the hood (mlx-swift native, no fork required for the core spec
-loop — only the architecture registration is missing).
+## The canonical reference — Blaizzy's `mlx-vlm`
 
-## Architecture `qwen3_5_mtp` (extracted from config.json + safetensors header)
+Prince Canuma's [`Blaizzy/mlx-vlm`](https://github.com/Blaizzy/mlx-vlm)
+project (MIT, MLX-native Python, maintained alongside ml-explore's
+own work) ships a **complete** Qwen3.5 / Qwen3.6 MTP drafter stack :
+
+```
+mlx_vlm/speculative/
+├── mtp.py                                            # spec decoding loop adapted for MTP
+├── common.py                                         # shared speculative primitives
+└── drafters/
+    └── qwen3_5_mtp/
+        ├── __init__.py
+        ├── config.py                       (45 LOC)  # Qwen3_5MTPConfig dataclass
+        ├── qwen3_5_mtp.py                 (422 LOC)  # ★ Qwen3_5MTPDraftModel
+        ├── split.py                       (161 LOC)  # ★ extract MTP weights from any Qwen3.5/3.6 model
+        └── README.md
+```
+
+The `Qwen3_5MTPDraftModel` class is structured exactly as our
+architecture analysis (below) suggested :
+
+- One `Qwen3_5DecoderLayer` (or `Qwen3_5MoeDecoderLayer` for the 35B MoE),
+  reused from the main model's layer class.
+- `pre_fc_norm_embedding`, `pre_fc_norm_hidden`, `fc` (Linear concat
+  projection), `norm`.
+- Forward signature : `(embedded_token, hidden_state) → next_N_tokens_logits`.
+- A small `block_size` knob (default 3) propagated via the config.
+
+It also publishes :
+
+- The **speculative-decoding loop** (`mtp.py`) that wraps the
+  main-model verify pass with the draft-model proposal pass — this is
+  the V2 counterpart of mlx-swift-lm's `SpeculativeTokenIterator` (in
+  `Libraries/MLXLMCommon/Evaluate.swift`), already wired for classic
+  drafters in V1.
+- A **splitter** (`split.py`) that takes any Qwen3.5 / Qwen3.6 source
+  checkpoint with `mtp.*` weights and emits a standalone drafter
+  folder. **This unblocks Sophie's Argo target** — extracting an MTP
+  draft from Qwen3.5-397B-A17B becomes a Python one-liner instead of
+  R&D.
+
+## Other public references (sanity / cross-check)
+
+| Repo | Language | What for |
+|---|---|---|
+| `InternLM/lmdeploy/pytorch/spec_decode/proposers/qwen3_5_mtp.py` | PyTorch | PyTorch reference — useful when the MLX→Swift translation hits a math ambiguity |
+| `jd-opensource/xllm/models/llm/qwen3_5_mtp.h` | C++ | Lowest-level reference, helpful for understanding the KV cache reuse pattern between main + draft |
+| `NVIDIA/TensorRT-Edge-LLM/.../modeling_qwen3_5_mtp.py` | PyTorch | NVIDIA's reference — typically the cleanest of the bunch |
+| `sgl-project/sglang/models/qwen3_next_mtp.py` | PyTorch | SGLang impl, useful for batch-verify semantics (V3 distributed) |
+| `vllm-project/vllm/config/speculative.py` | Python | Speculative-decoding config conventions used across the open-source serving world |
+
+## Architecture `qwen3_5_mtp` (cross-checked against config.json + safetensors)
 
 ```jsonc
 {
   "model_type": "qwen3_5_mtp",
-  "block_size": 3,                       // draft predicts 3 tokens / round
+  "block_size": 3,                          // draft predicts 3 tokens / round
   "text_config": {
-    "model_type": "qwen3_5_moe_text",    // same arch as main model layers
-    "mtp_num_hidden_layers": 1,          // ⚡ ONE single transformer layer
-    "mtp_use_dedicated_embeddings": false, // ⚡ reuses main model embeddings
-    "tie_word_embeddings": false,        // BUT has its own LM head
+    "model_type": "qwen3_5_moe_text",       // same arch as main model layers
+    "mtp_num_hidden_layers": 1,             // ⚡ ONE single transformer layer
+    "mtp_use_dedicated_embeddings": false,  // ⚡ reuses main model embeddings
+    "tie_word_embeddings": false,           // BUT has its own LM head
     "hidden_size": 2048,
     "num_experts": 256, "num_experts_per_tok": 8,
     "shared_expert_intermediate_size": 512,
@@ -47,7 +99,7 @@ loop — only the architecture registration is missing).
 }
 ```
 
-### Safetensors content (46 weights total, 906 MB)
+### Safetensors content (46 weights total, 906 MB on Qwen3.6-35B-A3B-MTP-MLX-9bit)
 
 ```
 pre_fc_norm_embedding.weight            ← normalize incoming embedding (from main model)
@@ -69,65 +121,73 @@ WITH the main model and uses the main model's embedding lookup table.
 This means the draft model holds 906 MB but its actual run-time RAM
 includes the main embeddings borrowed from the main model.
 
-## Blocker (discovered 2026-05-24)
+## V2 plan — Python → Swift port
 
-mlx-swift-lm 3.31 declares `Qwen35DecoderLayer`, `Qwen35Attention`,
-`Qwen35SparseMoeBlock` and the inner `Qwen35TextModelInner` helpers
-as `final class` with NO `public` modifier — they're module-internal
-to `MLXLLM`. Telemak (a downstream consumer) cannot compose them to
-build the MTP draft model class as proposed below.
+The work is split into three coherent units, each shippable
+independently :
 
-`LLMModelFactory.shared.registerModelType("qwen3_5_mtp", ...)` IS
-public and usable from Telemak, so the registration plumbing is open.
-But the building blocks for the draft's single decoder layer are
-behind the access modifier.
+### Unit 1 — Architecture port (`Qwen3_5MTPDraftModel`)
 
-**Three viable paths, pick before resuming V2 work :**
+Target file : `Sources/Telemak/Engine/MTP/Qwen35MTPDraftModel.swift`
 
-1. **Fork mlx-swift-lm locally** — patch the access modifiers (~5–10
-   lines), vendor the fork in `Package.swift`. Telemak then builds
-   `Qwen35MTP` reusing `Qwen35DecoderLayer`. Cost : permanent
-   maintenance burden, conflict resolution on every upstream bump.
-2. **Re-implement the primitives in Telemak** — copy `Qwen35Attention`,
-   `Qwen35SparseMoeBlock`, `Qwen35DecoderLayer`, related (`Qwen3NextMLP`,
-   `Qwen3NextRMSNormGated`) into `Sources/Telemak/Engine/MTP/`.
-   ~300–500 lines duplicated. Risks drift if upstream changes the
-   layer math.
-3. **Upstream PR to ml-explore** — change the affected classes to
-   `public` (or `package` if upstream prefers a stricter open scope).
-   Cleanest long-term ; bounded by ml-explore review cadence.
+Port `mlx_vlm/speculative/drafters/qwen3_5_mtp/qwen3_5_mtp.py` (422 LOC)
+to Swift. The MLX Python → MLX Swift API mapping :
 
-V2 work resumes once a path is chosen. The rest of the runbook below
-(model class definition, iterator changes, API surface, capability
-contract) is unchanged — just gated on having access to the primitives.
+| Python | Swift | Notes |
+|---|---|---|
+| `mx.array` | `MLXArray` | identical semantics |
+| `nn.Linear(a, b, bias=False)` | `Linear(a, b, bias: false)` | `MLXNN.Linear` |
+| `nn.RMSNorm(hidden, eps=…)` | `RMSNorm(dimensions: hidden, eps: …)` | `MLXNN.RMSNorm` |
+| `nn.Module` | `Module` | inherit |
+| `mx.concatenate([a, b], axis=-1)` | `concatenated([a, b], axis: -1)` | top-level fn |
+| `mx.softmax(x, axis=-1)` | `softmax(x, axis: -1)` | top-level fn |
+| `@property def foo(self)` | computed `var foo: …` | |
+| weight loading via `self.update_modules(...)` | conform `Module` + standard sanitize | mlx-swift-lm pattern |
 
-## What needs to change in mlx-swift-lm (or Telemak's local fork)
+The decoder layer dependency : two options to weigh once the bulk of
+the port is in place.
 
-### 1. New model class `Qwen35MTP` in `Libraries/MLXLLM/Models/`
+- **Option A — vendor `Qwen35DecoderLayer` from mlx-swift-lm**
+  (~400 LOC copied into `Sources/Telemak/Engine/MTP/Vendored/`).
+  Lower porting cost, slight maintenance debt on each mlx-swift-lm
+  bump (rebase the vendored copy).
+- **Option B — port `Qwen3_5DecoderLayer` from Blaizzy mlx-vlm**
+  (~200 LOC Python → Swift). Higher porting cost but full
+  independence — we own the layer math.
 
-A struct conforming to `LanguageModel` that :
-- Defines 1 `Qwen3_5MoeLayer` (same as the main model's layer class — already exists in `Qwen35.swift`)
-- Holds `preFcNormEmbedding`, `preFcNormHidden`, `norm`, `fc` (LM head)
-- Forward pass : `(embedded_token, hidden_state) → next_N_tokens_logits`
-- `block_size` config field exposed so the spec iterator knows how many tokens to expect per call
+Decision : pick during the work. Both are documented escape hatches.
+Default to Option A (vendor) since mlx-swift-lm's class is
+production-tested by ml-explore.
 
-### 2. Modify `SpeculativeTokenIterator` (in `Libraries/MLXLMCommon/Evaluate.swift`)
+### Unit 2 — Speculative loop port
 
-Currently the iterator assumes the draft model is a standalone `LanguageModel` that owns its embeddings. For MTP-style :
-- Pass `mainModel.embedTokens(...)` output into the draft's forward
-- Pass `mainModel`'s last hidden state into the draft's forward
-- Accept `block_size` candidate tokens per draft call (not 1)
+Target file : `Sources/Telemak/Engine/MTP/MTPSpeculativeIterator.swift`
+(or extend the existing `SpeculativeTokenIterator` if mlx-swift-lm's
+class is already public-extensible).
 
-Easiest path : add a `SpeculativeDraftModel` protocol with an alternate
-`forward(embedded:hidden:)` method, and let MTP drafts implement it.
-Classic drafts (standalone Qwen) keep using the existing `forward(input:)`.
+Port `mlx_vlm/speculative/mtp.py`. The semantics differ from classic
+spec decoding in two ways :
 
-### 3. Model registry detection
+- The draft model is called with `(embedded_token, hidden_state)` and
+  the hidden state comes from the main model's verify pass — there's
+  a tight coupling between the two models per spec round.
+- The draft emits **block_size** candidate tokens per call (3 by
+  default for Qwen3.6-35B-MTP), not 1. Acceptance/rejection sweeps
+  over the candidate window.
 
-Add `qwen3_5_mtp` to the recognized `model_type` list. The factory loads
-the new `Qwen35MTP` class when it sees this type.
+The KV cache is **shared between main and draft on linear-attention
+layers** — that's a non-trivial optimisation referenced in xllm.h
+and lmdeploy. First Telemak iteration can skip this (correctness
+first, perf later) ; the cache-sharing perf bump is a follow-up.
 
-### 4. Telemak API surface
+### Unit 3 — Telemak API + ModelRegistry wiring
+
+Target files : `Sources/Telemak/Server/Models.swift`,
+`Sources/Telemak/Engine/ModelRegistry.swift`,
+`Sources/Telemak/Server/ChatCompletions.swift`,
+`Sources/Telemak/Server/WellKnown.swift`.
+
+API surface :
 
 ```jsonc
 POST /admin/load
@@ -138,13 +198,12 @@ POST /admin/load
 }
 ```
 
-The `ModelRegistry` (already multi-model in V1) holds BOTH models, paired
-explicitly. `POST /v1/chat/completions` with this main model id auto-uses
-the paired draft model.
+The `ModelRegistry` (already multi-model in V1) holds BOTH models,
+paired explicitly. `POST /v1/chat/completions` with this main model id
+auto-uses the paired draft model.
 
-### 5. Capability contract
+Capability contract :
 
-`/.well-known/inference-engine.json` exposes :
 ```jsonc
 "speculative_decoding": {
   "supported": true,
@@ -155,24 +214,69 @@ the paired draft model.
 }
 ```
 
+### Bonus — Wrap Blaizzy's `split.py` as a Telemak admin endpoint
+
+Target file : `Sources/Telemak/Server/Models.swift` +
+`scripts/split-mtp.py` (Python helper called via subprocess from the
+endpoint).
+
+`split.py` runs in seconds on a downloaded checkpoint. Wrapping it
+as `POST /admin/models/split-mtp` lets a Telemak operator pop an MTP
+drafter out of any Qwen3.5/3.6 source without leaving the dashboard.
+
+This **also unblocks the V3 Argo path** : split a Qwen3.5-397B-A17B
+checkpoint into a drafter folder, then have the orchestrator pair
+them on the Argo cluster.
+
 ## Done criteria V2
 
-1. `Qwen35MTP` class registered, loads `inferencerlabs/Qwen3.6-35B-A3B-MTP-MLX-9bit` without crashing
-2. Pair load via `POST /admin/load` succeeds, both models in memory
-3. `POST /v1/chat/completions` produces a coherent completion at **measurably faster tok/s** than the main model alone — target **>1.5×** on a 300-word reply benchmark
-4. Acceptance rate per spec round exposed in `/admin/sessions` or similar telemetry (debug + tune)
-5. No regression on non-MTP main models (regression test : load a Gemma or Llama, run chat completion, no draft involved → same speed as before)
-6. Companion sees no breaking change in `/v1/models` or `/v1/chat/completions` API shape
+1. `Qwen35MTPDraftModel` class registered, loads
+   `inferencerlabs/Qwen3.6-35B-A3B-MTP-MLX-9bit` without crashing.
+2. Pair load via `POST /admin/load` succeeds, both models in memory.
+3. `POST /v1/chat/completions` produces a coherent completion at
+   **measurably faster tok/s** than the main model alone — target
+   **>1.5×** on a 300-word reply benchmark on Qwen3.6-35B-A3B / max-64.
+4. Acceptance rate per spec round exposed in `/admin/sessions` or
+   similar telemetry (debug + tune).
+5. No regression on non-MTP main models (regression test : load a
+   Gemma or Llama, run chat completion, no draft involved → same
+   speed as before).
+6. Companion sees no breaking change in `/v1/models` or
+   `/v1/chat/completions` API shape.
 
 ## Out of scope V2 (defer to V3)
 
-- **Distributed MTP on Argo cluster (Python)** — needs `mlx-lm` + `mlx-distributed` to support MTP draft AND pipeline-parallel batch verification. Real R&D, possibly upstream PR territory.
-- **Extracting MTP weights from Qwen3.5-397B-A17B ourselves** — Sophie's Argo target. Would require Python script to slice the original Qwen3.5-397B model weights into a separate MTP draft repo. Out of scope unless Inferencer publishes the draft.
-- **Auto-pairing main↔draft** — Telemak V2 requires explicit pairing in `/admin/load`. Auto-discovery (heuristic : if `<repo>-MTP-MLX-9bit` exists, suggest it) is V3 polish.
+- **Distributed MTP on Argo cluster (Python)** — needs `mlx-lm` +
+  `mlx-distributed` to support MTP draft AND pipeline-parallel batch
+  verification. Real R&D, but Blaizzy's `split.py` removes the
+  "extract the draft from the source model" half of the problem.
+- **Auto-pairing main↔draft** — Telemak V2 requires explicit pairing
+  in `/admin/load`. Auto-discovery (heuristic : if
+  `<repo>-MTP-MLX-9bit` exists, suggest it) is V3 polish. The V2 UI
+  surface for this is already half-prepped via the V1 multi-model
+  card.
+- **KV cache sharing main↔draft on linear-attention layers** — perf
+  optimisation referenced by lmdeploy / xllm. Skip for V2 (correctness
+  first), benchmark, then add as a V2.x perf round.
 
 ## References
 
-- mlx-swift-lm SpeculativeTokenIterator : `Libraries/MLXLMCommon/Evaluate.swift` (already exists, just needs the new draft-model protocol)
-- mlx-swift-lm Qwen3.5 main model : `Libraries/MLXLLM/Models/Qwen35.swift` (re-use its layer class for the MTP draft's single layer)
-- Inferencer's video demo : [youtube.com/xcreate](https://youtube.com/xcreate) — search "MTP speculative decoding"
-- Original Qwen MTP paper / architecture writeup : check Qwen team's tech reports on Qwen3-Next / Qwen3.6 series
+- [`Blaizzy/mlx-vlm`](https://github.com/Blaizzy/mlx-vlm) —
+  MIT-licensed canonical MLX Python reference (port target).
+  - `mlx_vlm/speculative/drafters/qwen3_5_mtp/qwen3_5_mtp.py` —
+    model class.
+  - `mlx_vlm/speculative/drafters/qwen3_5_mtp/split.py` — weight
+    splitter.
+  - `mlx_vlm/speculative/mtp.py` — speculative decoding loop.
+- [`InternLM/lmdeploy/.../qwen3_5_mtp.py`](https://github.com/InternLM/lmdeploy/tree/main/lmdeploy/pytorch/spec_decode/proposers) —
+  PyTorch reference.
+- [`NVIDIA/TensorRT-Edge-LLM/.../modeling_qwen3_5_mtp.py`](https://github.com/NVIDIA/TensorRT-Edge-LLM) —
+  NVIDIA reference.
+- mlx-swift-lm `SpeculativeTokenIterator` :
+  `Libraries/MLXLMCommon/Evaluate.swift` — classic-drafter wiring,
+  starting point for the MTP extension.
+- mlx-swift-lm `Qwen35.swift` : `Libraries/MLXLLM/Models/Qwen35.swift`
+  — the candidate to vendor for `Qwen35DecoderLayer` (Option A above).
+- HF model repos :
+  [`inferencerlabs/Qwen3.6-35B-A3B-MLX-9bit`](https://huggingface.co/inferencerlabs/Qwen3.6-35B-A3B-MLX-9bit) +
+  [`inferencerlabs/Qwen3.6-35B-A3B-MTP-MLX-9bit`](https://huggingface.co/inferencerlabs/Qwen3.6-35B-A3B-MTP-MLX-9bit).
