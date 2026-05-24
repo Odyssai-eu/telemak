@@ -31,10 +31,14 @@ struct Serve: AsyncParsableCommand {
             setenv("HF_HUB_CACHE", hfHubCache, 1)
         }
 
-        var logger = Logger(label: "telemak")
-        if let level = Logger.Level(rawValue: logLevel) {
-            logger.logLevel = level
+        // Bootstrap structured JSON logging before any Logger is created
+        // anywhere. Reads TELEMAK_LOG_LEVEL from the env; falls back to the
+        // --log-level flag if set, or `info` otherwise.
+        if !logLevel.isEmpty, ProcessInfo.processInfo.environment["TELEMAK_LOG_LEVEL"] == nil {
+            setenv("TELEMAK_LOG_LEVEL", logLevel, 1)
         }
+        LogConfig.bootstrap()
+        let logger = Logger(label: "telemak")
 
         let startTime = Date()
         let stateStore = StateStore()
