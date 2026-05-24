@@ -229,6 +229,13 @@ struct AnthropicMessagesHandler: Sendable {
                     "index": 0,
                 ])
 
+                // `message_delta` carries the final usage block. Anthropic
+                // spec puts `output_tokens` here; we also include
+                // `input_tokens` (technically belongs to `message_start`,
+                // but we don't know the prompt token count until
+                // `GenerateCompletionInfo` arrives — populate at delta
+                // time so clients reading either event see the right
+                // total).
                 try await send(event: "message_delta", payload: [
                     "type": "message_delta",
                     "delta": [
@@ -236,6 +243,7 @@ struct AnthropicMessagesHandler: Sendable {
                         "stop_sequence": NSNull(),
                     ],
                     "usage": [
+                        "input_tokens": info?.promptTokenCount ?? 0,
                         "output_tokens": info?.generationTokenCount ?? 0,
                     ],
                 ])
