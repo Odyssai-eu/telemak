@@ -128,7 +128,7 @@ struct ModelsHandler: Sendable {
 
     private func unload(_ request: Request) async throws -> Response {
         struct UnloadBody: Decodable { let model: String? }
-        let queryAll = request.uri.queryParameters.first { $0.key == "all" }?.value == "true"
+        let queryAll = request.uri.queryParameters["all"] == "true"
 
         let buf = try await request.body.collect(upTo: 1 << 16)
         let body: UnloadBody? = (try? JSONDecoder().decode(UnloadBody.self, from: Data(buffer: buf)))

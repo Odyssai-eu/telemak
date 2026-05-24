@@ -38,7 +38,8 @@ struct Serve: AsyncParsableCommand {
 
         let startTime = Date()
         let stateStore = StateStore()
-        let registry = ModelRegistry(stateStore: stateStore)
+        let sessionStore = SessionStore()
+        let registry = ModelRegistry(stateStore: stateStore, sessionStore: sessionStore)
         let stats = StatsTracker()
 
         if !noReplay {
@@ -48,6 +49,7 @@ struct Serve: AsyncParsableCommand {
         let app = buildApplication(
             registry: registry,
             stats: stats,
+            sessionStore: sessionStore,
             startTime: startTime,
             host: host,
             port: port,
