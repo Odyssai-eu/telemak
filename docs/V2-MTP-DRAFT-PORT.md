@@ -23,56 +23,107 @@ The new plan is the "Inferencer route" — port the Python reference to
 Swift and own the model layer end-to-end. Independence from
 mlx-swift-lm's visibility constraints on the affected classes.
 
-## Status — Unit 1 SHIPPED (2026-05-24 PM)
+## Status — Units 1 + 3 + Bonus SHIPPED (2026-05-24 evening)
 
-Both 1a (scaffold) and 1b (decoder layer vendor) landed via PR #25.
-The MTP architecture port is complete : `Qwen35MTPDraftModel` +
-config + sanitize + `MTPDecoderLayer` all in
-`Sources/Telemak/Engine/MTP/`. Build green.
+Three merged PRs : [#25](https://github.com/Odyssai-eu/telemak/pull/25)
+(Unit 1 architecture port), [#26](https://github.com/Odyssai-eu/telemak/pull/26)
+(intermediate docs), [#27](https://github.com/Odyssai-eu/telemak/pull/27)
+(Unit 3 API surface + draft loader + split-mtp endpoint + capability
+contract bump to v0.3.0).
 
-Vendoring decision : the upstream `Qwen35DecoderLayer` /
-`Qwen35Attention` / `Qwen35SparseMoeBlock` are module-internal in
-mlx-swift-lm, so we copy-pasted just the parts MTP actually needs
-into our target. Because the MTP draft model forces
-`full_attention_interval=1` (Python `replace(..., full_attention_interval=1)`),
-all MTP layers are full attention — we dropped the linear-attention
-branch (`Qwen35GatedDeltaNet`) entirely. The vendored file shrinks
-from ~700 LOC to ~250.
+What's live on `inferencerlabs/Qwen3.6-35B-A3B-MTP-MLX-9bit` :
 
-Public mlx-swift-lm helpers do the heavy lifting :
-`initializeRope`, `applyRotaryPosition`, `attentionWithCacheUpdate`,
-`SwitchGLU`, `RoPELayer`, `RMSNorm`. Only the layer shape + the
-forward pass live in our target.
+- Build : xcodebuild green (Debug + Release).
+- API : `POST /admin/load` accepts `draft_model`. Engine
+  capability advertises `speculative_decoding: {modes: ["mtp_adapter"],
+  active_pairs: []}` and flips `supported: true` automatically when
+  a pair is loaded.
+- Loader path : `MTPModelLoader.load(identifier:)` short-circuits
+  `LLMTypeRegistry` (our draft is `Module + BaseLanguageModel`, not
+  `LanguageModel`), stages config, runs `MLXLMCommon.loadWeights`
+  with the quantization settings the safetensors carry.
+- Registry pairing : `loadDraft(_:pairedWith:)` + `unload(_:)` work
+  in either direction (unload main drops paired draft ; unload draft
+  clears back-reference).
+- Bonus : `POST /admin/models/split-mtp` shells out to
+  `mlx_vlm.speculative.drafters.qwen3_5_mtp.split` so an operator
+  can pop an MTP drafter out of any Qwen3.5/3.6 source from the
+  dashboard.
 
-## Next units — runbook for the follow-up session
+Smoke status : engine v0.3.0 deployed to max-64. Capability endpoint
+serves the new shape ; load with a draft was blocked by **TCC Full
+Disk Access** — each new binary signature invalidates the prior
+grant, the operator (Sophie) must approve the new binary in System
+Settings → Privacy & Security → Full Disk Access before the loader
+can read `/Volumes/models`. Not a code bug.
 
-### Unit 2 — speculative loop port
+Once TCC is regranted, the load should complete : verified all 47
+safetensor keys in `Qwen3.6-35B-A3B-MTP-MLX-9bit/model.safetensors`
+match the ModuleInfo paths in `Qwen35MTPDraftModel` +
+`MTPDecoderLayer` + `MTPAttention` + `MTPSparseMoeBlock` exactly.
 
-Port `mlx_vlm/speculative/mtp.py` (920 LOC) to
-`Sources/Telemak/Engine/MTP/MTPSpeculativeIterator.swift`.
+## Unit 2 — the speculative loop (next session)
 
-The non-obvious bits :
+The remaining piece for the 1.6× speedup. Two coupled challenges :
 
-- The draft model's forward takes `(token_embedding, hidden_state)`
-  from the *target's* last hidden state — not just a token id. The
-  draft calls back into the target's `embed_tokens` (borrowed at
-  bind time) so the embedding lookup goes through the main model's
-  weights, not its own.
-- Each spec round emits `block_size - 1` candidate tokens (default
-  `block_size = 3` for Qwen3.6-35B-MTP → 2 candidates per round
-  + the seed from the prefill).
-- Acceptance/rejection sweeps over the candidate window: the target
-  verifies all candidates in one batched forward pass, the loop
-  finds the first reject, advances by that many accepted tokens
-  plus one bonus, trims the draft's KV cache by the rejected count.
-- mlx-swift-lm has `SpeculativeTokenIterator` in
-  `Libraries/MLXLMCommon/Evaluate.swift` — wired for classic
-  drafters. Either extend that class (if public-extension points
-  exist) or write a parallel `MTPSpeculativeIterator` that follows
-  the same protocol contract (`AsyncSequence<(token: Int, info: …)>`).
-- Skip the linear-attention KV-cache-sharing optimisation for the
-  first cut — correctness first, perf later (xllm.h and lmdeploy
-  reference it as a separate tuning round).
+### Challenge A — Hidden state extraction from the target model
+
+The MTP draft model's forward takes `(token_embedding,
+hidden_state)` where `hidden_state` is the *last-layer hidden
+state* of the target (before lm_head). mlx-swift-lm's
+`Qwen35TextModel.callAsFunction` returns logits, not hidden states.
+The intermediate `Qwen35TextModelInner.callAsFunction` (which
+returns hidden states) is module-internal — invisible from Telemak.
+
+Three options :
+- **Fork mlx-swift-lm**, expose `Qwen35TextModelInner.callAsFunction`
+  as `public`. Maintain a fork in Odyssai-eu. Low LOC, ongoing rebase
+  cost.
+- **Vendor the entire main model** (Qwen35MoEModel +
+  Qwen35TextModel + Qwen35TextModelInner + Qwen35DecoderLayer +
+  Qwen35Attention + Qwen35GatedDeltaNet + Qwen35SparseMoeBlock +
+  helpers) into `Sources/Telemak/Engine/MTP/Vendored/`. ~2000 LOC
+  of copy-paste, no fork to maintain, but every mlx-swift-lm bump
+  is a manual rebase chore.
+- **Upstream PR** : send ml-explore a PR making the inner classes
+  public-extensible. Right move long-term but blocks on review +
+  release cycle.
+
+Default to the fork (option 1) for V2 — fastest to ship, leaves the
+door open to upstream later.
+
+### Challenge B — Custom iterator (mlx-swift-lm's won't fit)
+
+`SpeculativeTokenIterator` in `MLXLMCommon/Evaluate.swift` requires
+the draft to be `any LanguageModel`. Our `Qwen35MTPDraftModel` is
+`BaseLanguageModel` but can't conform to `LanguageModel` — it has no
+`lm_head`, no `embed_tokens`, no `prepare(_:cache:windowSize:)` that
+makes sense (it needs the target's hidden state to even start).
+
+Write a parallel `MTPSpeculativeTokenIterator: TokenIteratorProtocol`
+that drives both models : prefill target → grab hidden states → seed
+draft → loop {draft proposes block_size-1, target batched verifies,
+accept up to first reject, emit bonus, trim draft cache}. ~500 LOC
+of Swift.
+
+### Order of work next session
+
+1. Fork mlx-swift-lm in Odyssai-eu ; expose the inner-model
+   `callAsFunction` (single one-line change).
+2. Point `Package.swift` at the fork.
+3. Smoke load the pair end-to-end on max-64 (after TCC regrant).
+4. Write `MTPSpeculativeTokenIterator`.
+5. Wire it into `/v1/chat/completions` : when `pairing[req.model]`
+   exists, switch from `TokenIterator` to MTP.
+6. Benchmark : 300-word reply at Qwen3.6-35B-A3B on max-64, expect
+   >1.5× vs main alone.
+
+## Historical runbook (now stale — kept for context)
+
+The plan below was written before Units 1+3+Bonus shipped. The Unit 2
+section above supersedes the inline Unit 2 here. Kept because the
+prose still maps the Python →
+Swift work units cleanly.
 
 ### Unit 3 — Telemak API + ModelRegistry wiring
 
