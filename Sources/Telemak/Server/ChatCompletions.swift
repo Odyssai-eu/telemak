@@ -1,5 +1,6 @@
 import Foundation
 import Hummingbird
+import MLX
 import MLXLMCommon
 import MLXRandom
 
@@ -8,6 +9,7 @@ struct ChatCompletionsHandler: Sendable {
     let registry: ModelRegistry
     let stats: StatsTracker
     let sessionStore: SessionStore?
+    let wiredMemory: WiredMemoryCoordinator?
 
     func add(to router: Router<BasicRequestContext>) {
         router.post("/v1/chat/completions") { request, context async throws -> Response in
@@ -47,6 +49,9 @@ struct ChatCompletionsHandler: Sendable {
         if let topK = payload.topK { params.topK = topK }
         if let minP = payload.minP { params.minP = minP }
         if let repetitionPenalty = payload.repetitionPenalty { params.repetitionPenalty = repetitionPenalty }
+        if let kvBits = payload.kvBits { params.kvBits = kvBits }
+        if let kvGroupSize = payload.kvGroupSize { params.kvGroupSize = kvGroupSize }
+        if let quantizedKvStart = payload.quantizedKvStart { params.quantizedKVStart = quantizedKvStart }
         let stopSequences = payload.stop?.asArray ?? []
 
         let toolSpecs: [[String: any Sendable]]? = payload.tools.map { values in
@@ -142,22 +147,24 @@ struct ChatCompletionsHandler: Sendable {
         var info: GenerateCompletionInfo?
         var collectedToolCalls: [ChatToolCall] = []
         do {
-            for try await gen in session.streamDetails(to: promptForGeneration, images: [], videos: []) {
-                switch gen {
-                case .chunk(let s):
-                    let emitted = stopChecker.feed(s)
-                    if !emitted.isEmpty { completion += emitted }
-                    if stopChecker.hit {
-                        stoppedEarly = true
+            try await runWithOptionalWiredLimit {
+                for try await gen in session.streamDetails(to: promptForGeneration, images: [], videos: []) {
+                    switch gen {
+                    case .chunk(let s):
+                        let emitted = stopChecker.feed(s)
+                        if !emitted.isEmpty { completion += emitted }
+                        if stopChecker.hit {
+                            stoppedEarly = true
+                        }
+                    case .info(let i):
+                        info = i
+                    case .toolCall(let call):
+                        collectedToolCalls.append(toolCallToChat(call))
                     }
-                case .info(let i):
-                    info = i
-                case .toolCall(let call):
-                    collectedToolCalls.append(toolCallToChat(call))
                 }
-            }
-            if !stopChecker.hit {
-                completion += stopChecker.flushRemaining()
+                if !stopChecker.hit {
+                    completion += stopChecker.flushRemaining()
+                }
             }
         } catch {
             return jsonError(.internalServerError, code: "generation_failed",
@@ -421,6 +428,19 @@ struct ChatCompletionsHandler: Sendable {
             FileHandle.standardError.write(Data("[telemak.kv] saveCache failed for session \(sessionId): \(error)\n".utf8))
             try? FileManager.default.removeItem(at: url)
         }
+    }
+
+    /// Run `body` under a wired-memory active ticket when a coordinator is
+    /// configured. Pass-through otherwise — keeps the non-prod / unit-test
+    /// paths uncluttered. Body is NOT @Sendable so it can capture
+    /// non-Sendable state (ChatSession, mutable locals from the request
+    /// handler).
+    private func runWithOptionalWiredLimit<R>(_ body: () async throws -> R) async throws -> R {
+        guard let wiredMemory else { return try await body() }
+        let ticket = await wiredMemory.makeInferenceTicket(
+            workspaceBytes: WiredMemoryCoordinator.defaultWorkspaceBytes
+        )
+        return try await WiredMemoryTicket.withWiredLimit(ticket, body)
     }
 
     /// Convert mlx-swift-lm's `ToolCall` (`{function: {name, arguments:

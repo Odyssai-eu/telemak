@@ -43,7 +43,12 @@ struct Serve: AsyncParsableCommand {
         let startTime = Date()
         let stateStore = StateStore()
         let sessionStore = SessionStore()
-        let registry = ModelRegistry(stateStore: stateStore, sessionStore: sessionStore)
+        let wiredMemory = WiredMemoryCoordinator()
+        let registry = ModelRegistry(
+            stateStore: stateStore,
+            sessionStore: sessionStore,
+            wiredMemory: wiredMemory
+        )
         let stats = StatsTracker()
 
         if !noReplay {
@@ -54,6 +59,7 @@ struct Serve: AsyncParsableCommand {
             registry: registry,
             stats: stats,
             sessionStore: sessionStore,
+            wiredMemory: wiredMemory,
             startTime: startTime,
             host: host,
             port: port,

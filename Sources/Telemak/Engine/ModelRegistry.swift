@@ -27,10 +27,16 @@ public actor ModelRegistry {
     private var entries: [String: Loaded] = [:]
     private let stateStore: StateStore?
     private let sessionStore: SessionStore?
+    private let wiredMemory: WiredMemoryCoordinator?
 
-    public init(stateStore: StateStore? = nil, sessionStore: SessionStore? = nil) {
+    public init(
+        stateStore: StateStore? = nil,
+        sessionStore: SessionStore? = nil,
+        wiredMemory: WiredMemoryCoordinator? = nil
+    ) {
         self.stateStore = stateStore
         self.sessionStore = sessionStore
+        self.wiredMemory = wiredMemory
     }
 
     // MARK: - Reads
@@ -107,6 +113,9 @@ public actor ModelRegistry {
         )
         entries[id] = loaded
         Self.dbg("entries updated id=\(id)")
+        if neededBytes > 0 {
+            await wiredMemory?.reserveModel(id, weightBytes: Int(neededBytes))
+        }
         await persistState()
         Self.dbg("persistState done id=\(id) total_wall=\(Date().timeIntervalSince(estimateStart))s")
         return container
@@ -133,6 +142,7 @@ public actor ModelRegistry {
     @discardableResult
     public func unload(_ id: String) async -> Bool {
         guard entries.removeValue(forKey: id) != nil else { return false }
+        await wiredMemory?.endReservation(id)
         await sessionStore?.invalidateModel(id)
         await persistState()
         return true
@@ -142,6 +152,9 @@ public actor ModelRegistry {
     public func unloadAll() async -> [String] {
         let ids = Array(entries.keys)
         entries.removeAll()
+        for id in ids {
+            await wiredMemory?.endReservation(id)
+        }
         _ = await sessionStore?.clearAll()
         await persistState()
         return ids

@@ -7,6 +7,7 @@ func buildApplication(
     registry: ModelRegistry,
     stats: StatsTracker,
     sessionStore: SessionStore,
+    wiredMemory: WiredMemoryCoordinator,
     startTime: Date,
     host: String,
     port: Int,
@@ -19,7 +20,7 @@ func buildApplication(
     router.add(middleware: LogRequestsMiddleware(.info))
 
     HealthHandler(registry: registry, stats: stats, startTime: startTime).add(to: router)
-    ChatCompletionsHandler(registry: registry, stats: stats, sessionStore: sessionStore).add(to: router)
+    ChatCompletionsHandler(registry: registry, stats: stats, sessionStore: sessionStore, wiredMemory: wiredMemory).add(to: router)
     AnthropicMessagesHandler(registry: registry, stats: stats, sessionStore: sessionStore).add(to: router)
     ModelsHandler(registry: registry).add(to: router)
     SessionsHandler(sessionStore: sessionStore).add(to: router)
