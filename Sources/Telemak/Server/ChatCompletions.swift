@@ -5,6 +5,7 @@ import MLXLMCommon
 /// POST /v1/chat/completions
 struct ChatCompletionsHandler: Sendable {
     let registry: ModelRegistry
+    let stats: StatsTracker
 
     func add(to router: Router<BasicRequestContext>) {
         router.post("/v1/chat/completions") { request, context async throws -> Response in
@@ -57,10 +58,12 @@ struct ChatCompletionsHandler: Sendable {
                 instructions: instructions,
                 params: params,
                 userPrompt: userPrompt,
-                modelId: modelId
+                modelId: modelId,
+                stats: stats
             )
         }
 
+        let genStart = Date()
         let completion: String
         do {
             completion = try await session.respond(to: userPrompt)
@@ -68,10 +71,12 @@ struct ChatCompletionsHandler: Sendable {
             return jsonError(.internalServerError, code: "generation_failed",
                               message: "model generation failed: \(error)")
         }
+        let genElapsed = Date().timeIntervalSince(genStart)
 
         let promptChars = userPrompt.count + (instructions?.count ?? 0)
         let promptTokens = max(1, promptChars / 4)
         let completionTokens = max(1, completion.count / 4)
+        await stats.recordRequest(tokens: completionTokens, elapsedSeconds: genElapsed)
 
         let response = ChatCompletionResponse(
             id: "chatcmpl-\(UUID().uuidString.lowercased())",
@@ -105,7 +110,8 @@ struct ChatCompletionsHandler: Sendable {
         instructions: String?,
         params: GenerateParameters,
         userPrompt: String,
-        modelId: String
+        modelId: String,
+        stats: StatsTracker
     ) -> Response {
         let id = "chatcmpl-\(UUID().uuidString.lowercased())"
         let created = Int(Date().timeIntervalSince1970)
@@ -127,6 +133,9 @@ struct ChatCompletionsHandler: Sendable {
                 try await writer.write(buffer)
             }
 
+            let genStart = Date()
+            var completionChars = 0
+
             do {
                 let role = ChatCompletionChunk(
                     id: id, object: "chat.completion.chunk",
@@ -136,6 +145,7 @@ struct ChatCompletionsHandler: Sendable {
                 try await send(role)
 
                 for try await piece in session.streamResponse(to: userPrompt) {
+                    completionChars += piece.count
                     let chunk = ChatCompletionChunk(
                         id: id, object: "chat.completion.chunk",
                         created: created, model: modelId,
@@ -156,6 +166,9 @@ struct ChatCompletionsHandler: Sendable {
                 let payload = #"{"error":{"message":"streaming aborted: \#(error)","type":"generation_failed"}}"#
                 try? await writer.write(ByteBuffer(string: "data: \(payload)\n\n"))
             }
+            let elapsed = Date().timeIntervalSince(genStart)
+            let estTokens = max(1, completionChars / 4)
+            await stats.recordRequest(tokens: estTokens, elapsedSeconds: elapsed)
             try await writer.finish(nil)
         }
 

@@ -23,6 +23,9 @@ struct Serve: AsyncParsableCommand {
     @Option(name: .long, help: "Log level (trace, debug, info, notice, warning, error, critical).")
     var logLevel: String = "info"
 
+    @Flag(name: .long, help: "Skip replaying ~/.telemak/state.json at boot.")
+    var noReplay: Bool = false
+
     func run() async throws {
         if let hfHubCache {
             setenv("HF_HUB_CACHE", hfHubCache, 1)
@@ -33,9 +36,40 @@ struct Serve: AsyncParsableCommand {
             logger.logLevel = level
         }
 
-        let registry = ModelRegistry()
-        let app = buildApplication(registry: registry, host: host, port: port, logger: logger)
+        let startTime = Date()
+        let stateStore = StateStore()
+        let registry = ModelRegistry(stateStore: stateStore)
+        let stats = StatsTracker()
+
+        if !noReplay {
+            await replayState(registry: registry, stateStore: stateStore, logger: logger)
+        }
+
+        let app = buildApplication(
+            registry: registry,
+            stats: stats,
+            startTime: startTime,
+            host: host,
+            port: port,
+            logger: logger
+        )
         logger.info("telemak listening on http://\(host):\(port)")
         try await app.runService()
+    }
+
+    private func replayState(registry: ModelRegistry, stateStore: StateStore, logger: Logger) async {
+        guard let state = await stateStore.read(), !state.loadedModels.isEmpty else {
+            logger.info("no persisted state — starting empty")
+            return
+        }
+        logger.info("replaying persisted state: \(state.loadedModels)")
+        for id in state.loadedModels {
+            do {
+                _ = try await registry.ensureLoaded(id)
+                logger.info("replayed model: \(id)")
+            } catch {
+                logger.warning("failed to replay model \(id): \(error) — continuing")
+            }
+        }
     }
 }
