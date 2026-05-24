@@ -118,6 +118,30 @@ This is one-time per machine. The `telemak` CLI binary doesn't trip Gatekeeper (
 | `TELEMAK_API_KEY` | Optional bearer token; when set, all endpoints except `/health` and `/.well-known/` require `Authorization: Bearer <key>` | unset → open |
 | `TELEMAK_CORS_ORIGIN` | `Access-Control-Allow-Origin` value | `*` |
 | `TELEMAK_MAX_SESSIONS` | Max KV-cached sessions in memory | `32` |
+| `TELEMAK_LOG_LEVEL` | `trace`, `debug`, `info`, `notice`, `warning`, `error`, `critical` | `info` |
+| `TELEMAK_LOAD_DEBUG` | Non-empty → emit per-step timing of `ModelRegistry.load` to stderr | unset (silent) |
+
+## Deploy gotcha — TCC permission per binary
+
+macOS's Transparency, Consent, Control (TCC) framework grants Privacy &
+Security permissions **per code-signature hash**, not per path. Telemak's
+ad-hoc-signed binary gets a fresh hash on every Release build, which
+invalidates the previous grant.
+
+Symptom after a redeploy: `/admin/load` hangs indefinitely with the
+process stuck in an `open()` syscall on `/Volumes/models/...`. The smoke
+binary works fine from an SSH shell (Terminal already has Full Disk
+Access) but the LaunchAgent-spawned `telemak serve` is denied silently.
+
+Fix after every deploy:
+1. **System Settings → Privacy & Security → Full Disk Access** on the
+   target machine.
+2. Find `telemak` — if listed with `✗`, remove with `−`.
+3. Add `+` → navigate to `/Users/admin/telemak/Release/telemak` → toggle ON.
+4. `launchctl kickstart -k gui/$(id -u)/eu.odyssai.telemak`.
+
+Permanent fix (V1.5): codesign with a stable Developer ID so the
+signature hash persists between builds.
 
 ## Documentation
 
