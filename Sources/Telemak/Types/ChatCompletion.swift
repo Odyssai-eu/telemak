@@ -10,6 +10,11 @@ struct ChatCompletionRequest: Codable, Sendable {
     var maxTokens: Int?
     var temperature: Float?
     var topP: Float?
+    var topK: Int?
+    var minP: Float?
+    var repetitionPenalty: Float?
+    var stop: StopSequence?
+    var seed: UInt64?
     var stream: Bool?
     var system: String?
     var sessionId: String?
@@ -20,9 +25,51 @@ struct ChatCompletionRequest: Codable, Sendable {
         case maxTokens = "max_tokens"
         case temperature
         case topP = "top_p"
+        case topK = "top_k"
+        case minP = "min_p"
+        case repetitionPenalty = "repetition_penalty"
+        case stop
+        case seed
         case stream
         case system
         case sessionId = "session_id"
+    }
+}
+
+/// OpenAI accepts `stop` as either a single string or array of strings.
+/// Decode both, normalize to `[String]`.
+enum StopSequence: Codable, Sendable {
+    case single(String)
+    case multiple([String])
+
+    var asArray: [String] {
+        switch self {
+        case .single(let s): return [s]
+        case .multiple(let arr): return arr
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let s = try? container.decode(String.self) {
+            self = .single(s)
+        } else if let arr = try? container.decode([String].self) {
+            self = .multiple(arr)
+        } else {
+            throw DecodingError.typeMismatch(
+                StopSequence.self,
+                .init(codingPath: container.codingPath,
+                      debugDescription: "stop must be string or [string]")
+            )
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .single(let s): try container.encode(s)
+        case .multiple(let arr): try container.encode(arr)
+        }
     }
 }
 
