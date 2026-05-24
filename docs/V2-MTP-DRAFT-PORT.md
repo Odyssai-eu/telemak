@@ -69,6 +69,38 @@ WITH the main model and uses the main model's embedding lookup table.
 This means the draft model holds 906 MB but its actual run-time RAM
 includes the main embeddings borrowed from the main model.
 
+## Blocker (discovered 2026-05-24)
+
+mlx-swift-lm 3.31 declares `Qwen35DecoderLayer`, `Qwen35Attention`,
+`Qwen35SparseMoeBlock` and the inner `Qwen35TextModelInner` helpers
+as `final class` with NO `public` modifier — they're module-internal
+to `MLXLLM`. Telemak (a downstream consumer) cannot compose them to
+build the MTP draft model class as proposed below.
+
+`LLMModelFactory.shared.registerModelType("qwen3_5_mtp", ...)` IS
+public and usable from Telemak, so the registration plumbing is open.
+But the building blocks for the draft's single decoder layer are
+behind the access modifier.
+
+**Three viable paths, pick before resuming V2 work :**
+
+1. **Fork mlx-swift-lm locally** — patch the access modifiers (~5–10
+   lines), vendor the fork in `Package.swift`. Telemak then builds
+   `Qwen35MTP` reusing `Qwen35DecoderLayer`. Cost : permanent
+   maintenance burden, conflict resolution on every upstream bump.
+2. **Re-implement the primitives in Telemak** — copy `Qwen35Attention`,
+   `Qwen35SparseMoeBlock`, `Qwen35DecoderLayer`, related (`Qwen3NextMLP`,
+   `Qwen3NextRMSNormGated`) into `Sources/Telemak/Engine/MTP/`.
+   ~300–500 lines duplicated. Risks drift if upstream changes the
+   layer math.
+3. **Upstream PR to ml-explore** — change the affected classes to
+   `public` (or `package` if upstream prefers a stricter open scope).
+   Cleanest long-term ; bounded by ml-explore review cadence.
+
+V2 work resumes once a path is chosen. The rest of the runbook below
+(model class definition, iterator changes, API surface, capability
+contract) is unchanged — just gated on having access to the primitives.
+
 ## What needs to change in mlx-swift-lm (or Telemak's local fork)
 
 ### 1. New model class `Qwen35MTP` in `Libraries/MLXLLM/Models/`
