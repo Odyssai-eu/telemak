@@ -190,18 +190,25 @@ public final class MTPSpeculativeIterator {
         //    i+1. Compare to draft[i] ; on first mismatch, accept up
         //    to that point and emit the target's choice as the new
         //    bonus.
-        let draftIds = (0 ..< nCandidates).map { i -> Int in
-            Int(draftTokens[0, i].item(Int32.self))
-        }
+        //
+        // Perf : we batch the argmaxes into one call and evaluate the
+        // resulting `[1, nCandidates + 1]` tensor a single time, then
+        // read the ints. Per-position `.item()` calls used to force
+        // an MLX↔CPU sync each iteration (≈ 2 * blockSize syncs per
+        // round) which dominated the loop cost on a 35B target.
+        let targetArgmax = MLX.argMax(logits, axis: -1)
+        let draftArgmax = draftTokens.reshaped(-1).asType(.int32)
+        eval(targetArgmax, draftArgmax)
+        let targetIds = targetArgmax.reshaped(-1).asArray(Int32.self).map(Int.init)
+        let draftIds = draftArgmax.asArray(Int32.self).map(Int.init)
+
         var accepted = 0
         var newTokens: [Int] = []
         var newBonus: Int = 0
 
         let budget = maxTokens - emitted - pending.count
         for pos in 0 ... nCandidates {
-            let posLogits = logits[0..., pos ..< (pos + 1), 0...]
-            let argmaxArr = MLX.argMax(posLogits, axis: -1)
-            let targetTok = Int(argmaxArr.item(Int32.self))
+            let targetTok = targetIds[pos]
             if pos < nCandidates && targetTok == draftIds[pos] {
                 accepted += 1
                 if newTokens.count < budget {
