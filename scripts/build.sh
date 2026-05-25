@@ -32,3 +32,35 @@ MENUBAR="$DERIVED/Build/Products/$CONFIGURATION/telemak-menubar"
 if [ -x "$MENUBAR" ]; then
   echo "✓ built $MENUBAR"
 fi
+
+# Sign Release builds with a stable code-signing identity so macOS TCC
+# (Full Disk Access / removable disks) remembers the grant across
+# rebuilds. Without this, every Release ships with a fresh ad-hoc
+# signature → new cdhash → TCC re-prompts the operator on every
+# deploy, blocking the LaunchAgent if nobody is at the screen to click.
+#
+# One-time setup per dev machine (see docs/CODESIGNING.md) :
+#   1. Generate self-signed cert via openssl (Code Signing EKU).
+#   2. Import into login or dedicated keychain.
+#   3. Trust as root for codeSign policy in System.keychain (sudo +
+#      Screen Sharing session on the build host — Sequoia requires a
+#      console user session for the trust mutation).
+#
+# CODESIGN_IDENTITY env var overrides which identity to use. Defaults
+# to "Telemak Developer (Odyssai-eu)" — the identity Sophie minted
+# 2026-05-24. Debug builds stay ad-hoc (fast inner loop, no perf
+# difference, TCC ad-hoc cdhash churn doesn't matter for dev).
+if [ "$CONFIGURATION" = "Release" ]; then
+  IDENTITY="${CODESIGN_IDENTITY:-Telemak Developer (Odyssai-eu)}"
+  if security find-identity -v -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then
+    echo "↳ signing Release binaries with identity '$IDENTITY'"
+    codesign --sign "$IDENTITY" --force --options runtime "$BINARY"
+    if [ -x "$MENUBAR" ]; then
+      codesign --sign "$IDENTITY" --force --options runtime "$MENUBAR"
+    fi
+    echo "✓ signed (cdhash will stay stable across rebuilds)"
+  else
+    echo "⚠ codesign identity '$IDENTITY' not found — Release will be ad-hoc-signed"
+    echo "  → TCC will re-prompt on every deploy. See docs/CODESIGNING.md to fix."
+  fi
+fi
