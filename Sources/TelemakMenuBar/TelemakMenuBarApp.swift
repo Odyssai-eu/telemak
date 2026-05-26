@@ -12,6 +12,11 @@ struct TelemakMenuBarApp: App {
         let s = Settings()
         _settings = StateObject(wrappedValue: s)
         _poller = StateObject(wrappedValue: HealthPoller(settings: s))
+        if TelemakInstaller.isInstalled == false {
+            DispatchQueue.main.async {
+                InstallerWindowController.shared.show()
+            }
+        }
     }
 
     var body: some Scene {
@@ -301,6 +306,10 @@ struct MenuBarPopover: View {
                     Image(systemName: "gear")
                 }
                 .help("Settings")
+                Button(action: { InstallerWindowController.shared.show() }) {
+                    Image(systemName: "arrow.down.app")
+                }
+                .help("Install or repair local service")
                 Spacer()
                 Button(action: { NSApplication.shared.terminate(nil) }) {
                     Text("Quit").foregroundColor(.red)
