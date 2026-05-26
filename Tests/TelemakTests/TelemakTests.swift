@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 import TelemakMTP
 
@@ -48,4 +49,73 @@ import TelemakMTP
     #expect(distribution.probability(1) == 0)
     #expect(distribution.probability(2) > 0)
     #expect(distribution.probability(3) > 0)
+}
+
+@Test func mtpCompatibilityRequiresContractForEmbeddedMarkers() throws {
+    let dir = try temporaryModelDir(config: [
+        "model_type": "qwen3_5",
+        "text_config": ["mtp_num_hidden_layers": 1],
+    ])
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let compatibility = MTPCompatibility.inspect(modelId: "test/qwen", directory: dir)
+
+    #expect(compatibility.status == .unverifiedEmbeddedMTP)
+    #expect(compatibility.overrideRequired == true)
+    #expect(compatibility.autoEnabled == false)
+}
+
+@Test func mtpCompatibilityAcceptsVerifiedEmbeddedContract() throws {
+    let dir = try temporaryModelDir(
+        config: [
+            "model_type": "qwen3_5",
+            "text_config": ["mtp_num_hidden_layers": 1],
+        ],
+        runtimeContract: ["runtime": "telemak", "schema": 1]
+    )
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let compatibility = MTPCompatibility.inspect(modelId: "test/qwen", directory: dir)
+
+    #expect(compatibility.status == .verifiedEmbeddedMTP)
+    #expect(compatibility.overrideRequired == false)
+    #expect(compatibility.autoEnabled == true)
+}
+
+@Test func mtpCompatibilityClassifiesSidecarDraftsAsOverrideOnly() throws {
+    let dir = try temporaryModelDir(config: ["model_type": "qwen3_5_mtp"])
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let compatibility = MTPCompatibility.inspect(modelId: "test/draft", directory: dir, isDraft: true)
+
+    #expect(compatibility.status == .sidecarOnly)
+    #expect(compatibility.overrideRequired == true)
+    #expect(compatibility.canRun(allowUnverified: false) == false)
+    #expect(compatibility.canRun(allowUnverified: true) == true)
+}
+
+@Test func mtpCompatibilityReportsNoMTPWithoutMarkers() throws {
+    let dir = try temporaryModelDir(config: ["model_type": "llama"])
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let compatibility = MTPCompatibility.inspect(modelId: "test/llama", directory: dir)
+
+    #expect(compatibility.status == .noMTP)
+    #expect(compatibility.overrideRequired == false)
+}
+
+private func temporaryModelDir(
+    config: [String: Any],
+    runtimeContract: [String: Any]? = nil
+) throws -> URL {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("telemak-tests-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let configData = try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys])
+    try configData.write(to: dir.appendingPathComponent("config.json"))
+    if let runtimeContract {
+        let contractData = try JSONSerialization.data(withJSONObject: runtimeContract, options: [.prettyPrinted, .sortedKeys])
+        try contractData.write(to: dir.appendingPathComponent("telemak_mtp.json"))
+    }
+    return dir
 }

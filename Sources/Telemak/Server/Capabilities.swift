@@ -1,5 +1,6 @@
 import Foundation
 import Hummingbird
+import TelemakMTP
 
 /// `GET /.well-known/inference-engine.json` — capability contract that
 /// Odysseus (and future clients) can auto-discover instead of hardcoding
@@ -35,17 +36,20 @@ struct CapabilitiesHandler: Sendable {
             let sizeGB: Double
             let loadedAt: String
             let kind: String
+            let mtp: MTPCompatibility
 
             enum CodingKeys: String, CodingKey {
                 case sizeGB = "size_gb"
                 case loadedAt = "loaded_at"
                 case kind
+                case mtp
             }
         }
 
         struct SpeculativePair: Encodable {
             let main: String
             let draft: String
+            let mtp: MTPCompatibility
         }
 
         struct SpeculativeCapability: Encodable {
@@ -100,7 +104,8 @@ struct CapabilitiesHandler: Sendable {
                 xTelemak: ModelExt(
                     sizeGB: Double(entry.ramEstimateBytes) / 1_073_741_824.0,
                     loadedAt: iso.string(from: entry.loadedAt),
-                    kind: entry.isVision ? "vlm" : "llm"
+                    kind: entry.isVision ? "vlm" : "llm",
+                    mtp: entry.mtpCompatibility
                 )
             )
         }
@@ -110,7 +115,14 @@ struct CapabilitiesHandler: Sendable {
                 xTelemak: ModelExt(
                     sizeGB: Double(entry.ramEstimateBytes) / 1_073_741_824.0,
                     loadedAt: iso.string(from: entry.loadedAt),
-                    kind: "embedder"
+                    kind: "embedder",
+                    mtp: MTPCompatibility(
+                        status: .noMTP,
+                        reason: "embedders do not support MTP decoding",
+                        source: entry.id,
+                        overrideRequired: false,
+                        autoEnabled: false
+                    )
                 )
             )
         }
@@ -124,10 +136,12 @@ struct CapabilitiesHandler: Sendable {
         // to `true` once Unit 2 lands, but the API surface
         // (`/admin/load` `draft_model`) accepts pairs today so the wire
         // contract stays stable.
-        let pairs = await registry.activePairs.map { SpeculativePair(main: $0.main, draft: $0.draft) }
+        let pairs = await registry.activePairInfo.map {
+            SpeculativePair(main: $0.main, draft: $0.draft, mtp: $0.compatibility)
+        }
         let speculative = SpeculativeCapability(
             supported: !pairs.isEmpty,
-            modes: ["mtp_adapter"],
+            modes: ["mtp_adapter", "embedded_head"],
             activePairs: pairs
         )
         let capabilities = Capabilities(

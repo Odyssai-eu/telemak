@@ -1,6 +1,7 @@
 import Foundation
 import MLXEmbedders
 import MLXLMCommon
+import TelemakMTP
 
 /// Holds N loaded models, allowing concurrent inference on different models.
 ///
@@ -24,6 +25,7 @@ public actor ModelRegistry {
         public let loadedAt: Date
         public let ramEstimateBytes: Int64
         public let isVision: Bool
+        public let mtpCompatibility: MTPCompatibility
     }
 
     /// MTP-draft companions to main models. Drafts have very different
@@ -37,6 +39,7 @@ public actor ModelRegistry {
         public let model: Qwen35MTPDraftModel
         public let loadedAt: Date
         public let ramEstimateBytes: Int64
+        public let mtpCompatibility: MTPCompatibility
     }
 
     public struct LoadedEmbedder: Sendable {
@@ -107,6 +110,23 @@ public actor ModelRegistry {
         pairing.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
     }
 
+    public struct ActivePairInfo: Sendable {
+        public let main: String
+        public let draft: String
+        public let compatibility: MTPCompatibility
+    }
+
+    public var activePairInfo: [ActivePairInfo] {
+        pairing.sorted { $0.key < $1.key }.map { mainId, draftId in
+            ActivePairInfo(
+                main: mainId,
+                draft: draftId,
+                compatibility: draftEntries[draftId]?.mtpCompatibility
+                    ?? MTPCompatibility.unavailable(modelId: draftId)
+            )
+        }
+    }
+
     // MARK: - Writes
 
     public enum LoadError: Error, Sendable {
@@ -159,7 +179,8 @@ public actor ModelRegistry {
             id: id, container: container,
             loadedAt: Date(),
             ramEstimateBytes: neededBytes,
-            isVision: ModelLoader.isVisionModel(identifier: id)
+            isVision: ModelLoader.isVisionModel(identifier: id),
+            mtpCompatibility: Self.mtpCompatibility(for: id, isDraft: false)
         )
         entries[id] = loaded
         Self.dbg("entries updated id=\(id)")
@@ -216,10 +237,17 @@ public actor ModelRegistry {
     /// `draftEntries` map and is invoked by the speculative loop when
     /// chat completions target `mainId`.
     @discardableResult
-    public func loadDraft(_ draftId: String, pairedWith mainId: String) async throws -> Qwen35MTPDraftModel {
+    public func loadDraft(
+        _ draftId: String,
+        pairedWith mainId: String,
+        allowUnverified: Bool = false
+    ) async throws -> Qwen35MTPDraftModel {
         if let existing = draftEntries[draftId] {
             // Reuse if already loaded. Update the pairing in case the
             // same draft got attached to a different main (rare).
+            guard existing.mtpCompatibility.canRun(allowUnverified: allowUnverified || Self.allowUnverifiedMTPFromEnvironment()) else {
+                throw LoadError.loadFailed(underlying: existing.mtpCompatibility.rejectedMessage(modelId: draftId))
+            }
             pairing[mainId] = draftId
             await persistState()
             return existing.model
@@ -228,6 +256,10 @@ public actor ModelRegistry {
             throw LoadError.loadFailed(
                 underlying: "main model '\(mainId)' not loaded — pair draft after main"
             )
+        }
+        let compatibility = Self.mtpCompatibility(for: draftId, isDraft: true)
+        guard compatibility.canRun(allowUnverified: allowUnverified || Self.allowUnverifiedMTPFromEnvironment()) else {
+            throw LoadError.loadFailed(underlying: compatibility.rejectedMessage(modelId: draftId))
         }
         let neededBytes = RamBudget.estimate(modelId: draftId) ?? 0
         let usedBytes = usedRamBytes()
@@ -248,7 +280,8 @@ public actor ModelRegistry {
         }
         draftEntries[draftId] = LoadedDraft(
             id: draftId, mainId: mainId, model: model,
-            loadedAt: Date(), ramEstimateBytes: neededBytes
+            loadedAt: Date(), ramEstimateBytes: neededBytes,
+            mtpCompatibility: compatibility
         )
         pairing[mainId] = draftId
         if neededBytes > 0 {
@@ -272,6 +305,20 @@ public actor ModelRegistry {
     private static func dbg(_ msg: String) {
         guard loadDebugEnabled else { return }
         FileHandle.standardError.write(Data("[telemak.mrl] \(msg)\n".utf8))
+    }
+
+    private static func mtpCompatibility(for id: String, isDraft: Bool) -> MTPCompatibility {
+        guard let directory = ModelLoader.resolvedModelDirectory(for: id) else {
+            return MTPCompatibility.unavailable(modelId: id)
+        }
+        return MTPCompatibility.inspect(modelId: id, directory: directory, isDraft: isDraft)
+    }
+
+    private static func allowUnverifiedMTPFromEnvironment() -> Bool {
+        let value = (ProcessInfo.processInfo.environment["TELEMAK_MTP_ALLOW_UNVERIFIED"] ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return ["1", "true", "yes", "on"].contains(value)
     }
 
     /// Unload one model by id. Returns true if the model was loaded.

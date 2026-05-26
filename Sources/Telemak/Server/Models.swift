@@ -2,6 +2,7 @@ import Foundation
 import Hummingbird
 import MLXLLM
 import MLXLMCommon
+import TelemakMTP
 
 /// `GET /v1/models`, `GET /admin/models/available`, `GET /admin/memory`,
 /// `POST /admin/load`, `POST /admin/unload`.
@@ -52,6 +53,7 @@ struct ModelsHandler: Sendable {
         }
         struct ModelExt: Encodable {
             let kind: String
+            let mtp: MTPCompatibility
         }
         struct ModelList: Encodable {
             let object: String
@@ -66,7 +68,7 @@ struct ModelsHandler: Sendable {
                 object: "model",
                 created: Int($0.loadedAt.timeIntervalSince1970),
                 owned_by: "telemak",
-                xTelemak: .init(kind: "llm")
+                xTelemak: .init(kind: $0.isVision ? "vlm" : "llm", mtp: $0.mtpCompatibility)
             )
         }
         let embedderEntries = embedders.map {
@@ -75,7 +77,16 @@ struct ModelsHandler: Sendable {
                 object: "model",
                 created: Int($0.loadedAt.timeIntervalSince1970),
                 owned_by: "telemak",
-                xTelemak: .init(kind: "embedder")
+                xTelemak: .init(
+                    kind: "embedder",
+                    mtp: MTPCompatibility(
+                        status: .noMTP,
+                        reason: "embedders do not support MTP decoding",
+                        source: $0.id,
+                        overrideRequired: false,
+                        autoEnabled: false
+                    )
+                )
             )
         }
         let entries = (llmEntries + embedderEntries).sorted { $0.id < $1.id }
@@ -129,6 +140,7 @@ struct ModelsHandler: Sendable {
         struct LoadBody: Decodable {
             let model: String
             let draft_model: String?
+            let allow_unverified_mtp: Bool?
         }
         let buf = try await request.body.collect(upTo: 1 << 16)
         let body: LoadBody
@@ -184,7 +196,11 @@ struct ModelsHandler: Sendable {
         // Optional draft pairing for MTP speculative decoding (V2).
         if let draftId = body.draft_model, !draftId.isEmpty {
             do {
-                _ = try await registry.loadDraft(draftId, pairedWith: body.model)
+                _ = try await registry.loadDraft(
+                    draftId,
+                    pairedWith: body.model,
+                    allowUnverified: body.allow_unverified_mtp ?? false
+                )
             } catch ModelRegistry.LoadError.insufficientMemory(let needed, let available, let ceiling, let currentlyLoaded) {
                 return insufficientMemoryError(
                     neededBytes: needed,

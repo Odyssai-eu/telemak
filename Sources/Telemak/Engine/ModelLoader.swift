@@ -253,7 +253,7 @@ public enum ModelLoader {
         return FileManager.default.fileExists(atPath: configPath, isDirectory: &isDir) && !isDir.boolValue
     }
 
-    private static func resolvedModelDirectory(for identifier: String) -> URL? {
+    static func resolvedModelDirectory(for identifier: String) -> URL? {
         if identifier.hasPrefix("/") {
             return resolveDirectory(at: identifier)
         }
