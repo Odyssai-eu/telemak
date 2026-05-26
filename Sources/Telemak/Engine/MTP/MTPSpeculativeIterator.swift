@@ -3,21 +3,27 @@ import MLX
 import MLXLLM
 import MLXLMCommon
 import MLXNN
-import MLXVLM
 
-/// Common ABI both Qwen3.5/3.6 dispatches (LLM `Qwen35Model` and
-/// VLM `Qwen35`) implement on the Odyssai-eu fork. Lets the
-/// speculative iterator and draft model work against either without
-/// caring which factory produced the container.
+/// Common ABI the Qwen3.5/3.6 LLM dispatch implements on the Odyssai-eu fork.
+/// Lets the speculative iterator and draft model use hidden states, embeddings,
+/// target batched verify, and rollback without depending on concrete internals.
 public protocol Qwen35HiddenStateProvider: AnyObject {
     func forwardWithHidden(_ inputs: MLXArray, cache: [KVCache]?) -> (logits: MLXArray, hidden: MLXArray)
     func embed(_ inputs: MLXArray) -> MLXArray
     func applyLMHead(_ hidden: MLXArray) -> MLXArray
+    func targetVerify(
+        _ inputs: MLXArray,
+        cache: [KVCache]?
+    ) -> (logits: MLXArray, hidden: MLXArray, rollback: Qwen35SpeculativeRollbackBuffer)
+    func rollbackSpeculativeCache(
+        cache: [KVCache],
+        rollbackBuffer: Qwen35SpeculativeRollbackBuffer,
+        acceptedCount: Int
+    )
     func newCache(parameters: GenerateParameters?) -> [KVCache]
 }
 
 extension Qwen35Model: Qwen35HiddenStateProvider {}
-extension Qwen35: Qwen35HiddenStateProvider {}
 
 /// Speculative-decoding driver for a Qwen3.5/3.6 main + MTP draft pair.
 ///
@@ -34,18 +40,11 @@ extension Qwen35: Qwen35HiddenStateProvider {}
 ///
 /// ## Cache rollback
 ///
-/// On rejection, the target's KV caches have advanced past the first
-/// reject and need to be rolled back. Strategy : snapshot the cache
-/// state before the verify forward (via `KVCache.copy()`), then on
-/// reject swap the cache array back to the snapshot. Cheap because
-/// MLXArray is reference-counted ; `copy()` for unmodified caches is
-/// effectively a pointer bump.
-///
-/// Note Qwen3.5/3.6 has interleaved linear-attention layers (
-/// `Qwen35GatedDeltaNet` backed by `MambaCache`) where in-place
-/// state mutation isn't reversible via `trim()`. The snapshot+swap
-/// strategy bypasses this : we keep the whole cache state, not just
-/// the trim count.
+/// On rejection, the target's KV + SSM caches have advanced past the first
+/// reject and need rollback. Qwen3.5/3.6 interleaves full-attention layers
+/// with `Qwen35GatedDeltaNet` linear-attention layers backed by `MambaCache`,
+/// so the iterator uses the fork's verify-time SSM capture buffer instead of
+/// a KV-only snapshot/replay.
 public final class MTPSpeculativeIterator {
 
     public let main: any Qwen35HiddenStateProvider
@@ -176,16 +175,13 @@ public final class MTPSpeculativeIterator {
         let bonusArr = MLXArray([Int32(bonusToken)], [1, 1])
         let verifyInput = concatenated([bonusArr, draftTokens], axis: 1)
 
-        // 3. Snapshot the main cache before the verify forward — so we
-        //    can roll back on rejection.
-        let snapshot = mainCache.map { $0.copy() }
-
-        // 4. Run target verify forward.
-        let (logits, hidden) = main.forwardWithHidden(verifyInput, cache: mainCache)
+        // 3. Run target verify forward and capture rollback data for
+        //    linear-attention SSM state.
+        let (logits, hidden, rollback) = main.targetVerify(verifyInput, cache: mainCache)
         // logits shape: [1, nCandidates + 1, vocab]
         // hidden shape: [1, nCandidates + 1, hidden_dim]
 
-        // 5. Acceptance walk : at each position i, the target's
+        // 4. Acceptance walk : at each position i, the target's
         //    argmax(logits[:, i, :]) is its prediction for position
         //    i+1. Compare to draft[i] ; on first mismatch, accept up
         //    to that point and emit the target's choice as the new
@@ -227,23 +223,22 @@ public final class MTPSpeculativeIterator {
             break
         }
 
-        // 6. Roll back main cache if we rejected any candidates.
+        // 5. Roll back main cache if we rejected any candidates. The
+        //    verify block is [bonus, accepted draft prefix, rejected suffix],
+        //    so `acceptedCount` includes the bonus token plus accepted draft
+        //    candidates. The new bonus is a prediction, not part of cache yet.
         let rejected = nCandidates - accepted
         if rejected > 0 {
-            mainCache = snapshot
-            // Re-play the accepted prefix (+ bonus) so the cache is in
-            // sync with what we'll yield. accepted + 1 tokens land in
-            // the cache.
-            if !newTokens.isEmpty {
-                let replayIds = newTokens.map { Int32($0) }
-                let replay = MLXArray(replayIds, [1, replayIds.count])
-                _ = main.forwardWithHidden(replay, cache: mainCache)
-            }
+            main.rollbackSpeculativeCache(
+                cache: mainCache,
+                rollbackBuffer: rollback,
+                acceptedCount: accepted + 1
+            )
         }
         // If rejected == 0, the verify forward already advanced the
         // cache by `nCandidates + 1` which is exactly what we want.
 
-        // 7. Update draft cache : trim back to acceptedCount + 1
+        // 6. Update draft cache : trim back to acceptedCount + 1
         //    correct positions, then push the (acceptedCount + bonus)
         //    new positions.
         draft.acceptVerifiedTokens(
@@ -254,7 +249,7 @@ public final class MTPSpeculativeIterator {
             cache: draftCache
         )
 
-        // 8. Push yielded tokens into pending ; track stats.
+        // 7. Push yielded tokens into pending ; track stats.
         pending.append(contentsOf: newTokens)
         bonusToken = newBonus
         roundsRun += 1

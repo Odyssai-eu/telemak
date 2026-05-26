@@ -369,10 +369,8 @@ struct ModelsHandler: Sendable {
             guard !promptTokens.isEmpty else {
                 throw HTTPError(.badRequest, message: "empty prompt after tokenization")
             }
-            // Cast the main model to our shared Qwen3.5/3.6 protocol.
-            // Both the LLM-side (Qwen35Model / Qwen35MoEModel) and the
-            // VLM-side (Qwen35 / Qwen35MoE) conform on the Odyssai-eu
-            // fork via fork-added forwardWithHidden / embed / applyLMHead.
+            // Cast the main model to our Qwen3.5/3.6 LLM protocol with
+            // fork-added forwardWithHidden / targetVerify / rollback APIs.
             guard let qwen = ctx.model as? any Qwen35HiddenStateProvider else {
                 throw HTTPError(.badRequest,
                                 message: "main model is not Qwen3.5/3.6 (\(type(of: ctx.model))); MTP unsupported")

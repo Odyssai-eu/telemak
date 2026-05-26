@@ -55,7 +55,7 @@ public final class Qwen35MTPDraftModel: Module, BaseLanguageModel, @unchecked Se
     /// Target (main) model the draft borrows embed_tokens + lm_head
     /// from. Set by `bind(_:)`. The draft holds the reference for the
     /// lifetime of one chat completion. The protocol lets us accept
-    /// either the LLM-side `Qwen35Model` or the VLM-side `Qwen35`.
+    /// the LLM-side `Qwen35Model`.
     public private(set) weak var boundTarget: (any Qwen35HiddenStateProvider)?
 
     /// Per-round draft state — number of draft positions appended to
@@ -344,4 +344,3 @@ public final class Qwen35MTPDraftModel: Module, BaseLanguageModel, @unchecked Se
         self.roundAppended = 0
     }
 }
-
