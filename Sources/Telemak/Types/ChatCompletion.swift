@@ -145,7 +145,7 @@ enum StopSequence: Codable, Sendable {
 
 struct ChatMessage: Codable, Sendable {
     var role: String
-    var content: String?
+    var content: ChatMessageContent?
     var toolCalls: [ChatToolCall]?
 
     enum CodingKeys: String, CodingKey {
@@ -156,9 +156,67 @@ struct ChatMessage: Codable, Sendable {
 
     init(role: String, content: String?, toolCalls: [ChatToolCall]? = nil) {
         self.role = role
-        self.content = content
+        self.content = content.map { .string($0) }
         self.toolCalls = toolCalls
     }
+}
+
+enum ChatMessageContent: Codable, Sendable {
+    case string(String)
+    case blocks([ChatContentBlock])
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let s = try? container.decode(String.self) {
+            self = .string(s)
+            return
+        }
+        if let blocks = try? container.decode([ChatContentBlock].self) {
+            self = .blocks(blocks)
+            return
+        }
+        throw DecodingError.typeMismatch(
+            ChatMessageContent.self,
+            .init(codingPath: container.codingPath,
+                  debugDescription: "content must be string or [content block]")
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .string(let s):
+            try container.encode(s)
+        case .blocks(let blocks):
+            try container.encode(blocks)
+        }
+    }
+
+    var asPlainText: String {
+        switch self {
+        case .string(let s):
+            return s
+        case .blocks(let blocks):
+            return blocks.compactMap(\.text).joined(separator: "\n\n")
+        }
+    }
+}
+
+struct ChatContentBlock: Codable, Sendable {
+    var type: String
+    var text: String?
+    var imageURL: ChatImageURL?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case text
+        case imageURL = "image_url"
+    }
+}
+
+struct ChatImageURL: Codable, Sendable {
+    var url: String
+    var detail: String?
 }
 
 struct ChatToolCall: Codable, Sendable {

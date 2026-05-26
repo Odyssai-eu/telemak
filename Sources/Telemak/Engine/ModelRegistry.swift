@@ -23,6 +23,7 @@ public actor ModelRegistry {
         public let container: ModelContainer
         public let loadedAt: Date
         public let ramEstimateBytes: Int64
+        public let isVision: Bool
     }
 
     /// MTP-draft companions to main models. Drafts have very different
@@ -157,7 +158,8 @@ public actor ModelRegistry {
         let loaded = Loaded(
             id: id, container: container,
             loadedAt: Date(),
-            ramEstimateBytes: neededBytes
+            ramEstimateBytes: neededBytes,
+            isVision: ModelLoader.isVisionModel(identifier: id)
         )
         entries[id] = loaded
         Self.dbg("entries updated id=\(id)")

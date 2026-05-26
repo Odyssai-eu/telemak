@@ -214,9 +214,64 @@ public enum ModelLoader {
         return URL(fileURLWithPath: path)
     }
 
+    public static func isVisionModel(identifier: String) -> Bool {
+        guard let directory = resolvedModelDirectory(for: identifier) else {
+            return identifier.lowercased().contains("vlm")
+                || identifier.lowercased().contains("-vl-")
+                || identifier.lowercased().contains("_vl_")
+        }
+        let configURL = directory.appendingPathComponent("config.json")
+        guard let data = try? Data(contentsOf: configURL),
+              let root = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? [String: Any]
+        else { return false }
+
+        if let visionConfig = root["vision_config"] as? [String: Any], !visionConfig.isEmpty {
+            return true
+        }
+
+        let modelType = (root["model_type"] as? String ?? "").lowercased()
+        let knownVLMTypes: Set<String> = [
+            "paligemma", "qwen2_vl", "qwen2_5_vl", "qwen3_vl", "idefics3",
+            "gemma4", "smolvlm", "fastvlm", "llava_qwen2", "pixtral",
+            "mistral3", "lfm2_vl", "lfm2-vl", "glm_ocr",
+        ]
+        if knownVLMTypes.contains(modelType) {
+            return true
+        }
+
+        let architectures = (root["architectures"] as? [String] ?? []).map { $0.lowercased() }
+        let haystack = ([modelType] + architectures).joined(separator: " ")
+        if haystack.contains("vlm") || haystack.contains("vision") || haystack.contains("_vl") || haystack.contains("vl_") {
+            return true
+        }
+        return false
+    }
+
     static func hasConfigJSON(at directory: String) -> Bool {
         var isDir: ObjCBool = false
         let configPath = (directory as NSString).appendingPathComponent("config.json")
         return FileManager.default.fileExists(atPath: configPath, isDirectory: &isDir) && !isDir.boolValue
+    }
+
+    private static func resolvedModelDirectory(for identifier: String) -> URL? {
+        if identifier.hasPrefix("/") {
+            return resolveDirectory(at: identifier)
+        }
+        if let modelsDir = ProcessInfo.processInfo.environment["TELEMAK_MODELS_DIR"],
+           let url = resolveModelsDir(modelsDir, id: identifier) {
+            return url
+        }
+        guard let hfCache = AvailableModels.defaultHFCache() else { return nil }
+        let cacheDir = "models--" + identifier.replacingOccurrences(of: "/", with: "--")
+        let cachePath = (hfCache as NSString).appendingPathComponent(cacheDir)
+        let snapshotsPath = (cachePath as NSString).appendingPathComponent("snapshots")
+        let fm = FileManager.default
+        guard let snapshots = try? fm.contentsOfDirectory(atPath: snapshotsPath) else { return nil }
+        let candidates = snapshots
+            .filter { !$0.hasPrefix(".") }
+            .map { (snapshotsPath as NSString).appendingPathComponent($0) }
+            .sorted()
+        guard let chosen = candidates.last(where: { hasConfigJSON(at: $0) }) else { return nil }
+        return URL(fileURLWithPath: chosen)
     }
 }

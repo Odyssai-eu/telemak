@@ -8,8 +8,8 @@ struct CapabilitiesHandler: Sendable {
     let registry: ModelRegistry
 
     /// Telemak engine semantic version — bump on contract changes.
-    /// 0.4.0 = +embeddings capability and /v1/embeddings route.
-    static let engineVersion = "0.4.0"
+    /// 0.5.0 = +vision image input on chat/messages.
+    static let engineVersion = "0.5.0"
 
     func add(to router: Router<BasicRequestContext>) {
         router.get("/.well-known/inference-engine.json") { _, _ async throws -> Response in
@@ -100,7 +100,7 @@ struct CapabilitiesHandler: Sendable {
                 xTelemak: ModelExt(
                     sizeGB: Double(entry.ramEstimateBytes) / 1_073_741_824.0,
                     loadedAt: iso.string(from: entry.loadedAt),
-                    kind: "llm"
+                    kind: entry.isVision ? "vlm" : "llm"
                 )
             )
         }
@@ -133,7 +133,7 @@ struct CapabilitiesHandler: Sendable {
         let capabilities = Capabilities(
             stream: true,
             tools: true,
-            vision: false,
+            vision: loaded.contains { $0.isVision },
             maxContext: 32_768,
             sessionCache: true,
             openaiCompat: "v1",

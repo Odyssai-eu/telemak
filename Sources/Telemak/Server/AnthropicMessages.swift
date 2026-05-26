@@ -21,7 +21,7 @@ struct AnthropicMessagesHandler: Sendable {
     }
 
     func handle(_ request: Request, context: BasicRequestContext) async throws -> Response {
-        let body = try await request.body.collect(upTo: 1 << 20)
+        let body = try await request.body.collect(upTo: 40 * 1024 * 1024)
         let payload: AnthropicMessagesRequest
         do {
             payload = try JSONDecoder().decode(AnthropicMessagesRequest.self, from: Data(buffer: body))
@@ -53,6 +53,12 @@ struct AnthropicMessagesHandler: Sendable {
             return jsonError(.badRequest, type: "invalid_request_error",
                               message: "no user message to generate from")
         }
+        let imageBatch: VisionImageBatch
+        do {
+            imageBatch = try await VisionInputs.collectAnthropicImages(from: payload.messages)
+        } catch {
+            return jsonError(.badRequest, type: "invalid_request_error", message: "\(error.localizedDescription)")
+        }
 
         let sessionId = payload.sessionId ?? request.headers[.init("X-Session-Id")!]
         let cacheHit: URL? = await {
@@ -69,6 +75,7 @@ struct AnthropicMessagesHandler: Sendable {
                 cacheHit: cacheHit,
                 effectiveSystem: effectiveSystem,
                 prompt: prompt,
+                images: imageBatch,
                 modelId: modelId,
                 sessionId: sessionId,
                 stats: stats,
@@ -95,7 +102,7 @@ struct AnthropicMessagesHandler: Sendable {
         var completion = ""
         var info: GenerateCompletionInfo?
         do {
-            for try await gen in session.streamDetails(to: prompt, images: [], videos: []) {
+            for try await gen in session.streamDetails(to: prompt, images: imageBatch.images, videos: []) {
                 switch gen {
                 case .chunk(let s): completion += s
                 case .info(let i): info = i
@@ -148,6 +155,7 @@ struct AnthropicMessagesHandler: Sendable {
         cacheHit: URL?,
         effectiveSystem: String?,
         prompt: String,
+        images: VisionImageBatch,
         modelId: String,
         sessionId: String?,
         stats: StatsTracker,
@@ -208,7 +216,7 @@ struct AnthropicMessagesHandler: Sendable {
                     "content_block": ["type": "text", "text": ""],
                 ])
 
-                for try await gen in session.streamDetails(to: prompt, images: [], videos: []) {
+                for try await gen in session.streamDetails(to: prompt, images: images.images, videos: []) {
                     switch gen {
                     case .chunk(let piece):
                         completion += piece

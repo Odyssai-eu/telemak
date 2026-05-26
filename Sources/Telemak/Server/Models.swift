@@ -349,6 +349,10 @@ struct ModelsHandler: Sendable {
             return jsonError(.notFound, code: "model_not_loaded",
                               message: "main model '\(mainId)' is not loaded")
         }
+        guard !main.isVision else {
+            return jsonError(.badRequest, code: "vision_mtp_unsupported",
+                              message: "MTP smoke does not support vision models")
+        }
         guard let draftId = await registry.draftId(for: mainId),
               let draftEntry = await registry.getDraft(draftId)
         else {

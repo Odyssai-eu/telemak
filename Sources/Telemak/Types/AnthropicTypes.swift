@@ -112,7 +112,21 @@ enum AnthropicMessageContent: Codable, Sendable {
 struct AnthropicContentBlock: Codable, Sendable {
     var type: String     // "text" | "image" | "tool_use" | "tool_result"
     var text: String?
-    // V1: ignore everything except text. Vision + tool blocks land later.
+    var source: AnthropicImageSource?
+}
+
+struct AnthropicImageSource: Codable, Sendable {
+    var type: String
+    var mediaType: String?
+    var data: String?
+    var url: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case mediaType = "media_type"
+        case data
+        case url
+    }
 }
 
 // MARK: - Response

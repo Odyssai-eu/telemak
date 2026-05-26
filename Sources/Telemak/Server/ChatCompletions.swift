@@ -18,7 +18,7 @@ struct ChatCompletionsHandler: Sendable {
     }
 
     func handle(_ request: Request, context: BasicRequestContext) async throws -> Response {
-        let body = try await request.body.collect(upTo: 1 << 20)   // 1 MB cap
+        let body = try await request.body.collect(upTo: 40 * 1024 * 1024)
         let payload: ChatCompletionRequest
         do {
             payload = try JSONDecoder().decode(ChatCompletionRequest.self, from: Data(buffer: body))
@@ -74,6 +74,12 @@ struct ChatCompletionsHandler: Sendable {
             return jsonError(.badRequest, code: "invalid_request_error",
                               message: "no user message to generate from")
         }
+        let imageBatch: VisionImageBatch
+        do {
+            imageBatch = try await VisionInputs.collectOpenAIImages(from: payload.messages)
+        } catch {
+            return jsonError(.badRequest, code: "invalid_request_error", message: "\(error.localizedDescription)")
+        }
 
         // session_id from body OR X-Session-Id header. Cache hit if SessionStore
         // has an entry for (session_id, modelId) — we then prefill ONLY the
@@ -96,6 +102,7 @@ struct ChatCompletionsHandler: Sendable {
                 sessionId: sessionId,
                 cacheHit: cacheHit,
                 stopSequences: stopSequences,
+                images: imageBatch,
                 toolSpecs: toolSpecs,
                 additionalContext: additionalContext,
                 stats: stats,
@@ -148,7 +155,7 @@ struct ChatCompletionsHandler: Sendable {
         var collectedToolCalls: [ChatToolCall] = []
         do {
             try await runWithOptionalWiredLimit {
-                for try await gen in session.streamDetails(to: promptForGeneration, images: [], videos: []) {
+                for try await gen in session.streamDetails(to: promptForGeneration, images: imageBatch.images, videos: []) {
                     switch gen {
                     case .chunk(let s):
                         let emitted = stopChecker.feed(s)
@@ -233,6 +240,7 @@ struct ChatCompletionsHandler: Sendable {
         sessionId: String?,
         cacheHit: URL?,
         stopSequences: [String],
+        images: VisionImageBatch,
         toolSpecs: [[String: any Sendable]]?,
         additionalContext: [String: any Sendable]?,
         stats: StatsTracker,
@@ -291,7 +299,7 @@ struct ChatCompletionsHandler: Sendable {
                 )
                 try await send(role)
 
-                for try await gen in session.streamDetails(to: userPrompt, images: [], videos: []) {
+                for try await gen in session.streamDetails(to: userPrompt, images: images.images, videos: []) {
                     switch gen {
                     case .chunk(let piece):
                         let emit = stopChecker.feed(piece)
@@ -481,23 +489,23 @@ struct ChatCompletionsHandler: Sendable {
 
     private func lastUserMessageOnly(_ messages: [ChatMessage]) -> String {
         if let last = messages.reversed().first(where: { $0.role == "user" }) {
-            return last.content ?? ""
+            return last.content?.asPlainText ?? ""
         }
         return ""
     }
 
     private func extractSystem(from messages: [ChatMessage]) -> String? {
-        let systemParts = messages.filter { $0.role == "system" }.compactMap(\.content)
+        let systemParts = messages.filter { $0.role == "system" }.compactMap { $0.content?.asPlainText }
         return systemParts.isEmpty ? nil : systemParts.joined(separator: "\n\n")
     }
 
     private func renderUserPrompt(from messages: [ChatMessage]) -> String {
         let nonSystem = messages.filter { $0.role != "system" }
         if nonSystem.count == 1, nonSystem[0].role == "user" {
-            return nonSystem[0].content ?? ""
+            return nonSystem[0].content?.asPlainText ?? ""
         }
         return nonSystem.map { msg in
-            let body = msg.content ?? ""
+            let body = msg.content?.asPlainText ?? ""
             return msg.role == "user" ? body : "[\(msg.role)] \(body)"
         }.joined(separator: "\n\n")
     }
