@@ -177,7 +177,11 @@ struct ModelsHandler: Sendable {
             return jsonResponse(.ok, data: data)
         } else {
             do {
-                _ = try await registry.load(body.model)
+                let forceLLM = body.draft_model.map {
+                    let draftType = ModelLoader.modelType(identifier: $0)
+                    return draftType == "gemma4_assistant" || draftType == "qwen3_5_mtp"
+                } ?? false
+                _ = try await registry.load(body.model, forceLLM: forceLLM)
             } catch ModelRegistry.LoadError.insufficientMemory(let needed, let available, let ceiling, let currentlyLoaded) {
                 return insufficientMemoryError(
                     neededBytes: needed,
@@ -368,26 +372,18 @@ struct ModelsHandler: Sendable {
             return jsonError(.notFound, code: "model_not_loaded",
                               message: "main model '\(mainId)' is not loaded")
         }
-        guard !main.isVision else {
-            return jsonError(.badRequest, code: "vision_mtp_unsupported",
-                              message: "MTP smoke does not support vision models")
-        }
         guard let draftId = await registry.draftId(for: mainId),
               let draftEntry = await registry.getDraft(draftId)
         else {
             return jsonError(.badRequest, code: "no_draft_paired",
                               message: "no MTP draft paired with main model '\(mainId)'")
         }
-        let maxTok = body.max_tokens ?? 128
-        let promptText = body.prompt
-        let draftModel: Qwen35MTPDraftModel
-        switch draftEntry.model {
-        case .qwen35(let qwenDraft):
-            draftModel = qwenDraft
-        case .gemma4Assistant:
+        guard case .qwen35(let draftModel) = draftEntry.model else {
             return jsonError(.badRequest, code: "gemma4_mtp_smoke_not_wired",
                               message: "Gemma4Assistant sidecar is loaded, but the Gemma4 speculative iterator is not wired yet")
         }
+        let maxTok = body.max_tokens ?? 128
+        let promptText = body.prompt
         var generationParameters = GenerateParameters(maxTokens: maxTok, temperature: body.temperature ?? 0)
         if let topP = body.top_p { generationParameters.topP = topP }
         if let topK = body.top_k { generationParameters.topK = topK }
@@ -417,6 +413,7 @@ struct ModelsHandler: Sendable {
             while let tok = iterator.next() {
                 generated.append(tok)
             }
+
             let elapsed = Date().timeIntervalSince(start)
             let text = ctx.tokenizer.decode(tokenIds: generated)
             let tps = elapsed > 0 ? Double(generated.count) / elapsed : 0

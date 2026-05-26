@@ -21,6 +21,7 @@ public struct Qwen35TextFields: Decodable, Sendable {
     public let partialRotaryFactor: Float
     public let ropeScaling: [String: StringOrNumber]?
     public let fullAttentionInterval: Int
+    public let intermediateSize: Int
     public let numExperts: Int
     public let numExpertsPerTok: Int
     public let normTopkProb: Bool
@@ -44,6 +45,7 @@ public struct Qwen35TextFields: Decodable, Sendable {
         case ropeScaling = "rope_scaling"
         case ropeParameters = "rope_parameters"
         case fullAttentionInterval = "full_attention_interval"
+        case intermediateSize = "intermediate_size"
         case numExperts = "num_experts"
         case numExpertsPerTok = "num_experts_per_tok"
         case normTopkProb = "norm_topk_prob"
@@ -88,6 +90,7 @@ public struct Qwen35TextFields: Decodable, Sendable {
                 [String: StringOrNumber].self, forKey: .ropeScaling)
         }
         self.fullAttentionInterval = try c.decodeIfPresent(Int.self, forKey: .fullAttentionInterval) ?? 4
+        self.intermediateSize = try c.decodeIfPresent(Int.self, forKey: .intermediateSize) ?? 0
         self.numExperts = try c.decodeIfPresent(Int.self, forKey: .numExperts) ?? 0
         self.numExpertsPerTok = try c.decodeIfPresent(Int.self, forKey: .numExpertsPerTok) ?? 0
         self.normTopkProb = try c.decodeIfPresent(Bool.self, forKey: .normTopkProb) ?? true

@@ -34,22 +34,31 @@ public enum ModelLoader {
 
     public static func load(
         identifier: String,
+        forceLLM: Bool = false,
         progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
     ) async throws -> ModelContainer {
         if identifier.hasPrefix("/") {
             if let url = resolveDirectory(at: identifier) {
                 let prepared = (try? prepareConfigForMLX(originalDir: url, id: identifier)) ?? url
-                return try await dispatchedLoad(prepared: prepared)
+                return try await dispatchedLoad(prepared: prepared, forceLLM: forceLLM)
             }
         }
 
         if let modelsDir = ProcessInfo.processInfo.environment["TELEMAK_MODELS_DIR"],
            let url = resolveModelsDir(modelsDir, id: identifier) {
             let prepared = (try? prepareConfigForMLX(originalDir: url, id: identifier)) ?? url
-            return try await dispatchedLoad(prepared: prepared)
+            return try await dispatchedLoad(prepared: prepared, forceLLM: forceLLM)
         }
 
         let configuration = ModelConfiguration(id: identifier)
+        if forceLLM {
+            return try await LLMModelFactory.shared.loadContainer(
+                from: #hubDownloader(),
+                using: #huggingFaceTokenizerLoader(),
+                configuration: configuration,
+                progressHandler: progressHandler
+            )
+        }
         return try await #huggingFaceLoadModelContainer(
             configuration: configuration,
             progressHandler: progressHandler
@@ -65,7 +74,13 @@ public enum ModelLoader {
     /// class blocks our V2 MTP path (different hidden-state extraction
     /// ABI). Force LLM dispatch for text-only Qwen3.5/3.6 ; everything
     /// else falls through to the generic factory.
-    private static func dispatchedLoad(prepared: URL) async throws -> ModelContainer {
+    private static func dispatchedLoad(prepared: URL, forceLLM: Bool) async throws -> ModelContainer {
+        if forceLLM {
+            return try await LLMModelFactory.shared.loadContainer(
+                from: prepared,
+                using: #huggingFaceTokenizerLoader()
+            )
+        }
         let configURL = prepared.appendingPathComponent("config.json")
         if let data = try? Data(contentsOf: configURL),
            let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -245,6 +260,15 @@ public enum ModelLoader {
             return true
         }
         return false
+    }
+
+    public static func modelType(identifier: String) -> String? {
+        guard let directory = resolvedModelDirectory(for: identifier) else { return nil }
+        let configURL = directory.appendingPathComponent("config.json")
+        guard let data = try? Data(contentsOf: configURL),
+              let root = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? [String: Any]
+        else { return nil }
+        return root["model_type"] as? String
     }
 
     static func hasConfigJSON(at directory: String) -> Bool {

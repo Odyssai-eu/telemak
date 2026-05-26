@@ -50,8 +50,16 @@ public final class JSONLogHandler: LogHandler, @unchecked Sendable {
     }
 
     public subscript(metadataKey key: String) -> Logger.Metadata.Value? {
-        get { metadata[key] }
-        set { metadata[key] = newValue }
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return metadata[key]
+        }
+        set {
+            lock.lock()
+            defer { lock.unlock() }
+            metadata[key] = newValue
+        }
     }
 
     public func log(
@@ -63,7 +71,10 @@ public final class JSONLogHandler: LogHandler, @unchecked Sendable {
         function: String,
         line: UInt
     ) {
-        let merged = explicit.map { self.metadata.merging($0, uniquingKeysWith: { _, b in b }) } ?? self.metadata
+        lock.lock()
+        let baseMetadata = self.metadata
+        lock.unlock()
+        let merged = explicit.map { baseMetadata.merging($0, uniquingKeysWith: { _, b in b }) } ?? baseMetadata
         let line = formatLine(
             level: level,
             message: message.description,

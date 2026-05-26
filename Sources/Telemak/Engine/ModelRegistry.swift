@@ -141,9 +141,14 @@ public actor ModelRegistry {
     /// requested model would push us over the ceiling — the operator must
     /// `unload` first.
     @discardableResult
-    public func load(_ id: String) async throws -> ModelContainer {
-        Self.dbg("entry id=\(id)")
+    public func load(_ id: String, forceLLM: Bool = false) async throws -> ModelContainer {
+        Self.dbg("entry id=\(id) forceLLM=\(forceLLM)")
         if let existing = entries[id] {
+            if forceLLM && existing.isVision {
+                throw LoadError.loadFailed(
+                    underlying: "model '\(id)' is already loaded as VLM; unload it before pairing an MTP draft"
+                )
+            }
             Self.dbg("hit id=\(id)")
             return existing.container
         }
@@ -168,7 +173,7 @@ public actor ModelRegistry {
         let loadStart = Date()
         let container: ModelContainer
         do {
-            container = try await ModelLoader.load(identifier: id)
+            container = try await ModelLoader.load(identifier: id, forceLLM: forceLLM)
         } catch {
             Self.dbg("ModelLoader.load THREW id=\(id) error=\(error)")
             throw LoadError.loadFailed(underlying: "\(error)")
@@ -179,7 +184,7 @@ public actor ModelRegistry {
             id: id, container: container,
             loadedAt: Date(),
             ramEstimateBytes: neededBytes,
-            isVision: ModelLoader.isVisionModel(identifier: id),
+            isVision: forceLLM ? false : ModelLoader.isVisionModel(identifier: id),
             mtpCompatibility: Self.mtpCompatibility(for: id, isDraft: false)
         )
         entries[id] = loaded
