@@ -334,6 +334,9 @@ struct ModelsHandler: Sendable {
             let model: String
             let prompt: String
             let max_tokens: Int?
+            let temperature: Float?
+            let top_p: Float?
+            let top_k: Int?
         }
         let buf = try await request.body.collect(upTo: 1 << 16)
         let body: SmokeBody
@@ -362,6 +365,10 @@ struct ModelsHandler: Sendable {
         let maxTok = body.max_tokens ?? 128
         let promptText = body.prompt
         let draftModel = draftEntry.model
+        var generationParameters = GenerateParameters(maxTokens: maxTok, temperature: body.temperature ?? 0)
+        if let topP = body.top_p { generationParameters.topP = topP }
+        if let topK = body.top_k { generationParameters.topK = topK }
+        let parameters = generationParameters
 
         return try await main.container.perform { ctx in
             // Tokenize the prompt with the main model's tokenizer.
@@ -380,7 +387,8 @@ struct ModelsHandler: Sendable {
                 main: qwen,
                 draft: draftModel,
                 promptTokens: promptTokens,
-                maxTokens: maxTok
+                maxTokens: maxTok,
+                parameters: parameters
             )
             var generated: [Int] = []
             while let tok = iterator.next() {

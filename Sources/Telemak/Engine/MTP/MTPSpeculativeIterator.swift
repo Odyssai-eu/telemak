@@ -3,6 +3,7 @@ import MLX
 import MLXLLM
 import MLXLMCommon
 import MLXNN
+import TelemakMTP
 
 /// Common ABI the Qwen3.5/3.6 LLM dispatch implements on the Odyssai-eu fork.
 /// Lets the speculative iterator and draft model use hidden states, embeddings,
@@ -34,9 +35,8 @@ extension Qwen35Model: Qwen35HiddenStateProvider {}
 /// speedup on Qwen3.6-35B-A3B is ~1.6× (matching what Inferencer.app
 /// demonstrates).
 ///
-/// Greedy-only for the first cut : both the target and the draft use
-/// argmax sampling. Temperature / top-p sampling adds complications
-/// (rejection probability needs the actual logits) that come later.
+/// Greedy fast path for `temperature <= 0`; probability-ratio acceptance
+/// plus residual correction for non-zero-temperature sampling.
 ///
 /// ## Cache rollback
 ///
@@ -69,18 +69,21 @@ public final class MTPSpeculativeIterator {
     private var pending: [Int] = []
     private var emitted: Int = 0
     private var done: Bool = false
+    private let sampler: MTPTokenSampler
 
     public init(
         main: any Qwen35HiddenStateProvider,
         draft: Qwen35MTPDraftModel,
         promptTokens: [Int],
         maxTokens: Int,
-        blockSize: Int? = nil
+        blockSize: Int? = nil,
+        parameters: GenerateParameters? = nil
     ) {
         self.main = main
         self.draft = draft
         self.blockSize = blockSize ?? draft.blockSize
         self.maxTokens = maxTokens
+        self.sampler = MTPTokenSampler(parameters: parameters)
 
         precondition(!promptTokens.isEmpty, "MTPSpeculativeIterator requires non-empty prompt")
         precondition(self.blockSize >= 2, "blockSize must be ≥ 2 for any speedup")
@@ -95,10 +98,9 @@ public final class MTPSpeculativeIterator {
         let promptArray = MLXArray(promptTokens.map { Int32($0) }, [1, promptTokens.count])
         let (logits, hidden) = main.forwardWithHidden(promptArray, cache: mainCache)
 
-        // 2. First bonus = argmax of the last position's logits.
+        // 2. First bonus = sample of the last position's target logits.
         let lastLogits = logits[0..., (logits.shape[1] - 1) ..< logits.shape[1], 0...]
-        let argmaxArr = MLX.argMax(lastLogits, axis: -1)
-        let bonus = Int(argmaxArr.item(Int32.self))
+        let bonus = sampler.sample(logits: lastLogits).token
         self.bonusToken = bonus
         self.pending.append(bonus)
         self.emitted = 0
@@ -108,7 +110,8 @@ public final class MTPSpeculativeIterator {
             inputIds: promptArray,
             hidden: hidden,
             bonusToken: bonus,
-            cache: draftCache
+            cache: draftCache,
+            sampler: sampler
         )
     }
 
@@ -163,12 +166,14 @@ public final class MTPSpeculativeIterator {
         let bonusEmbedding = target.embed(MLXArray([Int32(bonusToken)], [1, 1]))
 
         // 1. Draft proposes blockSize - 1 candidates.
-        let draftTokens = draft.draftBlock(
+        let draftBlock = draft.draftBlock(
             lastBonus: bonusToken,
             hidden: bonusEmbedding,
             cache: draftCache,
-            blockSize: blockSize
+            blockSize: blockSize,
+            sampler: sampler
         )
+        let draftTokens = draftBlock.tokens
         let nCandidates = draftTokens.shape[1]
 
         // 2. Build verify input = [bonus, draft[0], …, draft[nCandidates-1]].
@@ -181,47 +186,13 @@ public final class MTPSpeculativeIterator {
         // logits shape: [1, nCandidates + 1, vocab]
         // hidden shape: [1, nCandidates + 1, hidden_dim]
 
-        // 4. Acceptance walk : at each position i, the target's
-        //    argmax(logits[:, i, :]) is its prediction for position
-        //    i+1. Compare to draft[i] ; on first mismatch, accept up
-        //    to that point and emit the target's choice as the new
-        //    bonus.
-        //
-        // Perf : we batch the argmaxes into one call and evaluate the
-        // resulting `[1, nCandidates + 1]` tensor a single time, then
-        // read the ints. Per-position `.item()` calls used to force
-        // an MLX↔CPU sync each iteration (≈ 2 * blockSize syncs per
-        // round) which dominated the loop cost on a 35B target.
-        let targetArgmax = MLX.argMax(logits, axis: -1)
-        let draftArgmax = draftTokens.reshaped(-1).asType(.int32)
-        eval(targetArgmax, draftArgmax)
-        let targetIds = targetArgmax.reshaped(-1).asArray(Int32.self).map(Int.init)
-        let draftIds = draftArgmax.asArray(Int32.self).map(Int.init)
-
-        var accepted = 0
-        var newTokens: [Int] = []
-        var newBonus: Int = 0
-
-        let budget = maxTokens - emitted - pending.count
-        for pos in 0 ... nCandidates {
-            let targetTok = targetIds[pos]
-            if pos < nCandidates && targetTok == draftIds[pos] {
-                accepted += 1
-                if newTokens.count < budget {
-                    newTokens.append(targetTok)
-                }
-                continue
-            }
-            if newTokens.count < budget {
-                newTokens.append(targetTok)
-                newBonus = targetTok
-            } else {
-                // Budget already saturated — we keep the last accepted
-                // token's choice as the bonus.
-                newBonus = newTokens.last ?? bonusToken
-            }
-            break
-        }
+        // 4. Acceptance walk.
+        let acceptance = sampler.isGreedy
+            ? greedyAcceptance(logits: logits, draftTokens: draftTokens, nCandidates: nCandidates)
+            : samplingAcceptance(logits: logits, draftSamples: draftBlock.samples, nCandidates: nCandidates)
+        let accepted = acceptance.accepted
+        let newTokens = acceptance.newTokens
+        let newBonus = acceptance.newBonus
 
         // 5. Roll back main cache if we rejected any candidates. The
         //    verify block is [bonus, accepted draft prefix, rejected suffix],
@@ -246,7 +217,8 @@ public final class MTPSpeculativeIterator {
             draftTokens: draftTokens,
             accepted: accepted,
             newTokens: newTokens,
-            cache: draftCache
+            cache: draftCache,
+            sampler: sampler
         )
 
         // 7. Push yielded tokens into pending ; track stats.
@@ -255,5 +227,94 @@ public final class MTPSpeculativeIterator {
         roundsRun += 1
         totalProposed += nCandidates
         totalAccepted += accepted
+    }
+
+    private struct AcceptanceResult {
+        let accepted: Int
+        let newTokens: [Int]
+        let newBonus: Int
+    }
+
+    /// Greedy acceptance keeps the old vectorized argmax fast path.
+    private func greedyAcceptance(
+        logits: MLXArray,
+        draftTokens: MLXArray,
+        nCandidates: Int
+    ) -> AcceptanceResult {
+        let targetArgmax = MLX.argMax(logits, axis: -1)
+        let draftArgmax = draftTokens.reshaped(-1).asType(.int32)
+        eval(targetArgmax, draftArgmax)
+        let targetIds = targetArgmax.reshaped(-1).asArray(Int32.self).map(Int.init)
+        let draftIds = draftArgmax.asArray(Int32.self).map(Int.init)
+
+        var accepted = 0
+        var newTokens: [Int] = []
+        var newBonus: Int = 0
+
+        let budget = maxTokens - emitted - pending.count
+        for pos in 0 ... nCandidates {
+            let targetTok = targetIds[pos]
+            if pos < nCandidates && targetTok == draftIds[pos] {
+                accepted += 1
+                if newTokens.count < budget {
+                    newTokens.append(targetTok)
+                }
+                continue
+            }
+            if newTokens.count < budget {
+                newTokens.append(targetTok)
+                newBonus = targetTok
+            } else {
+                newBonus = newTokens.last ?? bonusToken
+            }
+            break
+        }
+
+        return AcceptanceResult(accepted: accepted, newTokens: newTokens, newBonus: newBonus)
+    }
+
+    /// Stochastic acceptance follows exact speculative sampling:
+    /// accept draft token with min(1, p/q), else sample from (p-q)+.
+    private func samplingAcceptance(
+        logits: MLXArray,
+        draftSamples: [MTPSampledToken],
+        nCandidates: Int
+    ) -> AcceptanceResult {
+        var accepted = 0
+        var newTokens: [Int] = []
+        var newBonus = bonusToken
+        let budget = maxTokens - emitted - pending.count
+
+        for pos in 0 ..< nCandidates {
+            let targetLogits = logits[0..., pos ..< (pos + 1), 0...]
+            let targetDistribution = sampler.distribution(from: targetLogits)
+            let draftSample = draftSamples[pos]
+            let decision = MTPSampling.verify(
+                target: targetDistribution,
+                draft: draftSample.distribution,
+                draftToken: draftSample.token
+            )
+            if decision.accepted {
+                accepted += 1
+                if newTokens.count < budget {
+                    newTokens.append(draftSample.token)
+                    newBonus = draftSample.token
+                }
+                continue
+            }
+            if newTokens.count < budget {
+                newTokens.append(decision.token)
+                newBonus = decision.token
+            }
+            return AcceptanceResult(accepted: accepted, newTokens: newTokens, newBonus: newBonus)
+        }
+
+        let bonusLogits = logits[0..., nCandidates ..< (nCandidates + 1), 0...]
+        let bonusSample = sampler.sample(logits: bonusLogits)
+        if newTokens.count < budget {
+            newTokens.append(bonusSample.token)
+            newBonus = bonusSample.token
+        }
+        return AcceptanceResult(accepted: accepted, newTokens: newTokens, newBonus: newBonus)
     }
 }

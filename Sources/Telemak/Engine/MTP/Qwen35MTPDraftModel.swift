@@ -3,6 +3,7 @@ import MLX
 import MLXLLM
 import MLXLMCommon
 import MLXNN
+import TelemakMTP
 
 /// Qwen3.5 / Qwen3.6 MTP draft model — Swift port of
 /// `Blaizzy/mlx-vlm`'s `Qwen3_5MTPDraftModel`.
@@ -67,7 +68,7 @@ public final class Qwen35MTPDraftModel: Module, BaseLanguageModel, @unchecked Se
     /// or `accept_verified_tokens` call. Consumed at the start of the
     /// next `draftBlock` to recover the position lost to the rejected
     /// candidates of the previous round.
-    private var seedToken: MLXArray?
+    private var seedSample: MTPSampledToken?
     private var seedHidden: MLXArray?
 
     public init(_ config: Qwen35MTPConfiguration) {
@@ -183,7 +184,7 @@ public final class Qwen35MTPDraftModel: Module, BaseLanguageModel, @unchecked Se
     /// is safe — old reference is dropped.
     public func bind(_ target: any Qwen35HiddenStateProvider) {
         self.boundTarget = target
-        self.seedToken = nil
+        self.seedSample = nil
         self.seedHidden = nil
         self.roundAppended = 0
     }
@@ -219,11 +220,12 @@ public final class Qwen35MTPDraftModel: Module, BaseLanguageModel, @unchecked Se
     /// `(input_ids[1:] + first_bonus)` plus the target's hidden states
     /// at those positions. This primes the draft's KV cache so the
     /// first `draftBlock` call has the correct K/V to attend over.
-    public func prefillFromTargetHidden(
+    func prefillFromTargetHidden(
         inputIds: MLXArray,
         hidden: MLXArray,
         bonusToken: Int,
-        cache: [KVCache]
+        cache: [KVCache],
+        sampler: MTPTokenSampler
     ) {
         guard let target = boundTarget else {
             fatalError("Qwen35MTPDraftModel.prefillFromTargetHidden called before bind(_:).")
@@ -250,45 +252,52 @@ public final class Qwen35MTPDraftModel: Module, BaseLanguageModel, @unchecked Se
         // produced by the prefill and the bonus token as the seed.
         let lastH = h[0..., (shiftedLen - 1) ..< shiftedLen, 0...]
         let logits = target.applyLMHead(lastH)
-        let argmax = MLX.argMax(logits, axis: -1)
-        self.seedToken = argmax
+        self.seedSample = sampler.sample(logits: logits)
         self.seedHidden = lastH
+    }
+
+    struct DraftBlock {
+        let tokens: MLXArray
+        let samples: [MTPSampledToken]
     }
 
     /// Propose `blockSize - 1` candidate tokens autoregressively. The
     /// first candidate either consumes the seed (from prefill /
     /// previous accept) or comes from a fresh `(lastBonus, hidden)`
     /// forward through the draft.
-    public func draftBlock(
+    func draftBlock(
         lastBonus: Int,
         hidden: MLXArray,
         cache: [KVCache],
-        blockSize: Int
-    ) -> MLXArray {
+        blockSize: Int,
+        sampler: MTPTokenSampler
+    ) -> DraftBlock {
         guard let target = boundTarget else {
             fatalError("Qwen35MTPDraftModel.draftBlock called before bind(_:).")
         }
         var tok = MLXArray([Int32(lastBonus)], [1, 1])
         var hPrev = hidden
-        var tokens: [MLXArray] = []
+        var samples: [MTPSampledToken] = []
         self.roundAppended = 0
 
-        if let st = self.seedToken, let sh = self.seedHidden {
-            tok = st
+        if let seed = self.seedSample, let sh = self.seedHidden {
+            tok = MLXArray([Int32(seed.token)], [1, 1])
             hPrev = sh
-            tokens.append(tok)
-            self.seedToken = nil
+            samples.append(seed)
+            self.seedSample = nil
             self.seedHidden = nil
         }
 
-        while tokens.count < blockSize - 1 {
+        while samples.count < blockSize - 1 {
             hPrev = forwardToken(tok, previousHidden: hPrev, cache: cache)
             self.roundAppended += 1
             let logits = target.applyLMHead(hPrev)
-            tok = MLX.argMax(logits, axis: -1)
-            tokens.append(tok)
+            let sample = sampler.sample(logits: logits)
+            tok = MLXArray([Int32(sample.token)], [1, 1])
+            samples.append(sample)
         }
-        return concatenated(tokens, axis: 1)
+        let tokenIds = samples.map { Int32($0.token) }
+        return DraftBlock(tokens: MLXArray(tokenIds, [1, tokenIds.count]), samples: samples)
     }
 
     /// Update the draft's KV cache after the target has verified the
@@ -296,12 +305,13 @@ public final class Qwen35MTPDraftModel: Module, BaseLanguageModel, @unchecked Se
     /// past the first reject), then re-forward the (newly-accepted +
     /// bonus) tokens to bring the cache back into sync with what the
     /// target accepted.
-    public func acceptVerifiedTokens(
+    func acceptVerifiedTokens(
         verifyHidden: MLXArray,
         draftTokens: MLXArray,
         accepted: Int,
         newTokens: [Int],
-        cache: [KVCache]
+        cache: [KVCache],
+        sampler: MTPTokenSampler
     ) {
         guard let target = boundTarget else {
             fatalError("Qwen35MTPDraftModel.acceptVerifiedTokens called before bind(_:).")
@@ -335,10 +345,10 @@ public final class Qwen35MTPDraftModel: Module, BaseLanguageModel, @unchecked Se
                 cache: cache.map { $0 as KVCache? }
             )
             // Seed for next round : use the last position's hidden +
-            // its argmax as the seed token.
+            // its sampled token.
             let lastH = h[0..., (h.shape[1] - 1) ..< h.shape[1], 0...]
             let logits = target.applyLMHead(lastH)
-            self.seedToken = MLX.argMax(logits, axis: -1)
+            self.seedSample = sampler.sample(logits: logits)
             self.seedHidden = lastH
         }
         self.roundAppended = 0

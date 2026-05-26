@@ -7,6 +7,7 @@ let package = Package(
         .macOS(.v14),
     ],
     products: [
+        .library(name: "TelemakMTP", targets: ["TelemakMTP"]),
         .executable(name: "telemak", targets: ["Telemak"]),
         .executable(name: "telemak-menubar", targets: ["TelemakMenuBar"]),
     ],
@@ -22,9 +23,17 @@ let package = Package(
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
     ],
     targets: [
+        .target(
+            name: "TelemakMTP",
+            dependencies: [
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                .product(name: "MLX", package: "mlx-swift"),
+            ]
+        ),
         .executableTarget(
             name: "Telemak",
             dependencies: [
+                "TelemakMTP",
                 .product(name: "MLXLLM", package: "mlx-swift-lm"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "MLXEmbedders", package: "mlx-swift-lm"),
@@ -44,7 +53,7 @@ let package = Package(
         .testTarget(
             name: "TelemakTests",
             dependencies: [
-                "Telemak",
+                "TelemakMTP",
                 .product(name: "HummingbirdTesting", package: "hummingbird"),
             ]
         ),
