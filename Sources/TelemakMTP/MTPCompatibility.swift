@@ -82,10 +82,10 @@ public struct MTPCompatibility: Codable, Equatable, Sendable {
             || fileExists(directory.appendingPathComponent("model-mtp.safetensors"))
         let hasMTPMarkers = mtpLayerCount > 0 || hasMTPWeights
 
-        if isDraft || modelType == "qwen3_5_mtp" {
+        if isDraft || modelType == "qwen3_5_mtp" || modelType == "gemma4_assistant" {
             return MTPCompatibility(
                 status: .sidecarOnly,
-                reason: "standalone qwen3_5_mtp sidecar draft; Telemak requires explicit admin override before pairing unverified external MTP artifacts",
+                reason: "standalone MTP sidecar draft; Telemak requires explicit admin override before pairing unverified external MTP artifacts",
                 source: directory.path,
                 contractPath: runtimeContractURL?.path,
                 overrideRequired: true,

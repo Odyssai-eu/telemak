@@ -36,7 +36,7 @@ public actor ModelRegistry {
     public struct LoadedDraft: Sendable {
         public let id: String
         public let mainId: String
-        public let model: Qwen35MTPDraftModel
+        public let model: MTPModelLoader.LoadedDraftModel
         public let loadedAt: Date
         public let ramEstimateBytes: Int64
         public let mtpCompatibility: MTPCompatibility
@@ -241,7 +241,7 @@ public actor ModelRegistry {
         _ draftId: String,
         pairedWith mainId: String,
         allowUnverified: Bool = false
-    ) async throws -> Qwen35MTPDraftModel {
+    ) async throws -> MTPModelLoader.LoadedDraftModel {
         if let existing = draftEntries[draftId] {
             // Reuse if already loaded. Update the pairing in case the
             // same draft got attached to a different main (rare).
@@ -272,7 +272,7 @@ public actor ModelRegistry {
                 currentlyLoaded: loadedModelIds + draftEntries.keys.sorted()
             )
         }
-        let model: Qwen35MTPDraftModel
+        let model: MTPModelLoader.LoadedDraftModel
         do {
             model = try MTPModelLoader.load(identifier: draftId)
         } catch {

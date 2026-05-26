@@ -380,7 +380,14 @@ struct ModelsHandler: Sendable {
         }
         let maxTok = body.max_tokens ?? 128
         let promptText = body.prompt
-        let draftModel = draftEntry.model
+        let draftModel: Qwen35MTPDraftModel
+        switch draftEntry.model {
+        case .qwen35(let qwenDraft):
+            draftModel = qwenDraft
+        case .gemma4Assistant:
+            return jsonError(.badRequest, code: "gemma4_mtp_smoke_not_wired",
+                              message: "Gemma4Assistant sidecar is loaded, but the Gemma4 speculative iterator is not wired yet")
+        }
         var generationParameters = GenerateParameters(maxTokens: maxTok, temperature: body.temperature ?? 0)
         if let topP = body.top_p { generationParameters.topP = topP }
         if let topK = body.top_k { generationParameters.topK = topK }

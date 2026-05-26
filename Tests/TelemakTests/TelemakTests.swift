@@ -94,6 +94,18 @@ import TelemakMTP
     #expect(compatibility.canRun(allowUnverified: true) == true)
 }
 
+@Test func mtpCompatibilityClassifiesGemma4AssistantAsSidecarDraft() throws {
+    let dir = try temporaryModelDir(config: ["model_type": "gemma4_assistant"])
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let compatibility = MTPCompatibility.inspect(modelId: "test/gemma4-mtp", directory: dir)
+
+    #expect(compatibility.status == .sidecarOnly)
+    #expect(compatibility.overrideRequired == true)
+    #expect(compatibility.canRun(allowUnverified: false) == false)
+    #expect(compatibility.canRun(allowUnverified: true) == true)
+}
+
 @Test func mtpCompatibilityReportsNoMTPWithoutMarkers() throws {
     let dir = try temporaryModelDir(config: ["model_type": "llama"])
     defer { try? FileManager.default.removeItem(at: dir) }

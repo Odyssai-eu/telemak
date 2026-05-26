@@ -1,9 +1,10 @@
 import Foundation
 import MLX
+import MLXLLM
 import MLXLMCommon
 import MLXNN
 
-/// Parallel loader for `qwen3_5_mtp` draft models.
+/// Parallel loader for sidecar MTP draft models.
 ///
 /// mlx-swift-lm's `LLMTypeRegistry.shared` only registers types whose
 /// model class conforms to `LanguageModel`. Our `Qwen35MTPDraftModel`
@@ -21,6 +22,11 @@ import MLXNN
 ///    variable for the staged-config path. Surface a clear error if
 ///    we can't find it locally.
 public enum MTPModelLoader {
+
+    public enum LoadedDraftModel: @unchecked Sendable {
+        case qwen35(Qwen35MTPDraftModel)
+        case gemma4Assistant(Gemma4AssistantModel)
+    }
 
     public enum LoadError: Error, CustomStringConvertible {
         case directoryNotFound(id: String)
@@ -40,8 +46,7 @@ public enum MTPModelLoader {
             case .configDecodeFailed(let dir, let why):
                 return "config.json decode failed in \(dir): \(why)"
             case .wrongModelType(let dir, let got):
-                return
-                    "expected model_type 'qwen3_5_mtp' in \(dir)/config.json, got '\(got)'"
+                return "unsupported MTP draft model_type '\(got)' in \(dir)/config.json"
             case .noSafetensors(let dir):
                 return "no *.safetensors files found in \(dir)"
             case .weightLoadFailed(let why):
@@ -53,13 +58,28 @@ public enum MTPModelLoader {
     /// Resolve `identifier` to a directory, stage its config for MLX
     /// (handles the inferencerlabs `quantization_config` quirk the
     /// same way `ModelLoader` does), then instantiate + load weights.
-    public static func load(identifier: String) throws -> Qwen35MTPDraftModel {
+    public static func load(identifier: String) throws -> LoadedDraftModel {
         let dir = try resolveDir(identifier)
         let staged = (try? ModelLoader.prepareConfigForMLX(originalDir: dir, id: identifier)) ?? dir
         let configURL = staged.appendingPathComponent("config.json")
         guard let configData = try? Data(contentsOf: configURL) else {
             throw LoadError.configMissing(dir: staged.path)
         }
+        guard let root = try? JSONSerialization.jsonObject(with: configData) as? [String: Any] else {
+            throw LoadError.configDecodeFailed(dir: staged.path, underlying: "invalid JSON")
+        }
+        let modelType = (root["model_type"] as? String) ?? ""
+        switch modelType {
+        case "qwen3_5_mtp":
+            return .qwen35(try loadQwen35MTP(staged: staged, configData: configData))
+        case "gemma4_assistant":
+            return .gemma4Assistant(try loadGemma4Assistant(staged: staged, configData: configData))
+        default:
+            throw LoadError.wrongModelType(dir: staged.path, gotType: modelType)
+        }
+    }
+
+    private static func loadQwen35MTP(staged: URL, configData: Data) throws -> Qwen35MTPDraftModel {
         let decoder = JSONDecoder()
         let mtpConfig: Qwen35MTPConfiguration
         do {
@@ -67,23 +87,13 @@ public enum MTPModelLoader {
         } catch {
             throw LoadError.configDecodeFailed(dir: staged.path, underlying: "\(error)")
         }
-        guard mtpConfig.modelType == "qwen3_5_mtp" else {
-            throw LoadError.wrongModelType(dir: staged.path, gotType: mtpConfig.modelType)
-        }
-        // BaseConfiguration handles the quantization shape +
-        // per-layer overrides. `prepareConfigForMLX` ensures the
-        // top-level `quantization` key exists with sane defaults.
         let baseConfig: BaseConfiguration
         do {
             baseConfig = try decoder.decode(BaseConfiguration.self, from: configData)
         } catch {
             throw LoadError.configDecodeFailed(dir: staged.path, underlying: "\(error)")
         }
-        // Sanity : at least one safetensors file.
-        let entries = (try? FileManager.default.contentsOfDirectory(atPath: staged.path)) ?? []
-        guard entries.contains(where: { $0.hasSuffix(".safetensors") }) else {
-            throw LoadError.noSafetensors(dir: staged.path)
-        }
+        try ensureSafetensors(in: staged)
         let model = Qwen35MTPDraftModel(mtpConfig)
         do {
             try loadWeights(
@@ -95,6 +105,41 @@ public enum MTPModelLoader {
             throw LoadError.weightLoadFailed(underlying: "\(error)")
         }
         return model
+    }
+
+    private static func loadGemma4Assistant(staged: URL, configData: Data) throws -> Gemma4AssistantModel {
+        let decoder = JSONDecoder.json5()
+        let config: Gemma4AssistantConfiguration
+        do {
+            config = try decoder.decode(Gemma4AssistantConfiguration.self, from: configData)
+        } catch {
+            throw LoadError.configDecodeFailed(dir: staged.path, underlying: "\(error)")
+        }
+        let baseConfig: BaseConfiguration
+        do {
+            baseConfig = try decoder.decode(BaseConfiguration.self, from: configData)
+        } catch {
+            throw LoadError.configDecodeFailed(dir: staged.path, underlying: "\(error)")
+        }
+        try ensureSafetensors(in: staged)
+        let model = Gemma4AssistantModel(config)
+        do {
+            try loadWeights(
+                modelDirectory: staged,
+                model: model,
+                perLayerQuantization: baseConfig.perLayerQuantization
+            )
+        } catch {
+            throw LoadError.weightLoadFailed(underlying: "\(error)")
+        }
+        return model
+    }
+
+    private static func ensureSafetensors(in staged: URL) throws {
+        let entries = (try? FileManager.default.contentsOfDirectory(atPath: staged.path)) ?? []
+        guard entries.contains(where: { $0.hasSuffix(".safetensors") }) else {
+            throw LoadError.noSafetensors(dir: staged.path)
+        }
     }
 
     private static func resolveDir(_ identifier: String) throws -> URL {
