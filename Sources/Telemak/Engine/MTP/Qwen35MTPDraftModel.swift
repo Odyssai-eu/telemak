@@ -126,19 +126,9 @@ public final class Qwen35MTPDraftModel: Module, BaseLanguageModel, @unchecked Se
         var out: [String: MLXArray] = [:]
         var working = weights
 
-        // 1a. Keep only MTP weights, stripping both historical sidecar
-        // `mtp.` and embedded native `language_model.mtp.` namespaces.
+        // 1a. Strip `mtp.` prefix (if Blaizzy split.py emitted it).
         let stripped: [String: MLXArray] = working.reduce(into: [:]) { acc, kv in
-            let key: String
-            if kv.key.hasPrefix("language_model.mtp.") {
-                key = String(kv.key.dropFirst("language_model.mtp.".count))
-            } else if kv.key.hasPrefix("mtp.") {
-                key = String(kv.key.dropFirst("mtp.".count))
-            } else if Self.isBareMTPWeight(kv.key) {
-                key = kv.key
-            } else {
-                return
-            }
+            let key = kv.key.hasPrefix("mtp.") ? String(kv.key.dropFirst("mtp.".count)) : kv.key
             acc[key] = kv.value
         }
         working = stripped
@@ -183,14 +173,6 @@ public final class Qwen35MTPDraftModel: Module, BaseLanguageModel, @unchecked Se
             out[key] = v
         }
         return out
-    }
-
-    private static func isBareMTPWeight(_ key: String) -> Bool {
-        key.hasPrefix("layers.")
-            || key.hasPrefix("fc.")
-            || key.hasPrefix("norm.")
-            || key.hasPrefix("pre_fc_norm_embedding.")
-            || key.hasPrefix("pre_fc_norm_hidden.")
     }
 
     // MARK: - Speculative-loop helpers

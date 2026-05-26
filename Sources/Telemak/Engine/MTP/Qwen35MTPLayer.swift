@@ -227,18 +227,11 @@ public final class MTPDecoderLayer: Module {
     @ModuleInfo(key: "self_attn") var selfAttn: MTPAttention
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
-    @ModuleInfo(key: "mlp") var mlp: Module
+    @ModuleInfo(key: "mlp") var mlp: MTPSparseMoeBlock
 
     public init(_ args: Qwen35TextFields) {
         _selfAttn.wrappedValue = MTPAttention(args)
-        if args.numExperts > 0 {
-            _mlp.wrappedValue = MTPSparseMoeBlock(args)
-        } else {
-            _mlp.wrappedValue = MTPGatedMLP(
-                dimensions: args.hiddenSize,
-                hiddenDimensions: args.intermediateSize
-            )
-        }
+        _mlp.wrappedValue = MTPSparseMoeBlock(args)
         _inputLayerNorm.wrappedValue = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
         _postAttentionLayerNorm.wrappedValue =
             RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
@@ -258,6 +251,6 @@ public final class MTPDecoderLayer: Module {
         _ = positionIds
         let r = selfAttn(inputLayerNorm(x), mask: mask, cache: cache)
         let h = x + r
-        return h + (mlp as! UnaryLayer)(postAttentionLayerNorm(h))
+        return h + mlp(postAttentionLayerNorm(h))
     }
 }
