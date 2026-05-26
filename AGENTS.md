@@ -1,375 +1,462 @@
 # AGENTS.md — Telemak
 
-> Runbook for an AI coding agent (Claude Code, Codex, Cursor, Aider…) building
-> Telemak's first MVP. The repo is empty. Your job is to scaffold a Swift
-> package, wire up `mlx-swift-lm`, expose an HTTP `/v1/chat/completions` with
-> token streaming, and prove that a small Qwen or Gemma model responds end-to-end.
+> Runbook for a coding agent (Claude, Codex, Cursor, Aider…) picking up
+> Telemak development with a fresh context. Read this top to bottom **before**
+> opening a file — it explains where Telemak fits in OdyssAI's stack, how the
+> build/deploy works (it has a few gotchas), what's already shipped, what
+> issues are open right now, and the workflow rules.
 >
-> Read [README.md](README.md) first for the product framing. Then read this
-> file top-to-bottom — the order matters.
+> If anything in this doc contradicts what you observe in the code, the code
+> is the source of truth — note the discrepancy and update this doc in your
+> commit.
 
-> **Permissions** : ce projet a `bypassPermissions` activé dans
-> `.claude/settings.local.json`. L'agent peut écrire/exécuter/installer sans
-> prompter — conçu pour des sessions overnight unattended. Le scope est
-> verrouillé sur `~/Claude/code/telemak/` + (lecture) `~/Claude/code/odyssai-wiki/`
-> + (lecture) `~/Claude/code/MLX Distributed/`.
->
-> **Knowledge base** : `/Users/sophie/Claude/code/odyssai-wiki/` est la vault
-> Obsidian centrale d'OdyssAI. Consulte-la pour le contexte cross-projet
-> (HTTP API contract, topology.yaml, http-proxy backend, glossary). Notes
-> atomiques avec wikilinks. Articles clés pour Telemak :
-> [[telemak-runtime]], [[http-api-contract]], [[topology-yaml]], [[http-proxy]].
+## 0. What Telemak is, today
 
-## 0. What Telemak is (and isn't)
+Telemak is a **native macOS HTTP runtime for MLX inference, on one Mac**.
+Current version : **v0.2.0** (running in production on `max-64.lan` since
+2026-05-23).
 
-**Telemak is a native macOS HTTP runtime for MLX inference, on one Mac.**
-- One Swift binary (CLI for MVP, `.app` later)
-- Loads MLX-quantized models from the local Hugging Face cache (`~/.cache/huggingface/hub/`)
-- Exposes OpenAI- and Anthropic-compatible HTTP API on a configurable port (default `:8002`)
-- Built on Apple's [`ml-explore/mlx-swift-lm`](https://github.com/ml-explore/mlx-swift-lm) (released as a standalone library — separate from `mlx-swift-examples`)
+- Single Swift package, two binaries : `telemak` (CLI server) and
+  `telemak-menubar` (status menubar app).
+- Loads MLX-quantized models from `~/.cache/huggingface/hub/` (or any
+  models_dir you point it at via `--models-dir`).
+- Exposes an OpenAI-compatible HTTP API on `:8003` (default). Streaming SSE,
+  `/v1/chat/completions`, `/v1/models`, `/admin/load`, `/admin/unload`,
+  `/admin/api/global-settings`, `/health`, capability contract at
+  `/.well-known/inference-engine.json`.
+- Built on the **`Odyssai-eu/mlx-swift-lm`** fork (Sophie's customised fork
+  of `ml-explore/mlx-swift-lm`). The fork carries MTP / hidden-states work
+  that upstream hasn't accepted yet.
+- Registered in Odysseus' `topology.yaml` as a `backend: http-proxy`
+  cluster, so Companion → Odysseus → Telemak routing works transparently.
 
-**Telemak is NOT :**
-- A distributed engine (Odysseus does that — `backend: jaccl` / `ring` across N Macs)
+**What Telemak is NOT** :
+
+- A distributed engine (Odysseus does that — `backend: jaccl` / `ring` across
+  N Macs)
 - A chat client (Companion does that)
-- A model converter (use mlx-lm's `mlx_lm.convert` upstream)
-- A RAG system (Ulysse will do that, future)
+- A model converter (use `mlx_lm.convert` upstream)
 
-If your task drifts toward any of the above, STOP and ask the user.
+If a task drifts toward those, stop and re-read this section.
 
-## 1. Context you should have read
+## 1. Where Telemak fits in the OdyssAI stack
 
-Before writing any Swift code, skim these :
+```
+┌─────────────────────┐       ┌──────────────────────┐      ┌────────────────────┐
+│   Companion (React) │  HTTP │  Odysseus (FastAPI)  │ HTTP │  Telemak (Swift)   │
+│   thecompai/app     │ ────► │  scripts/api.py      │ ───► │  this repo         │
+│   user UI + memory  │       │  orchestrator + LB   │      │  one-Mac inference │
+└─────────────────────┘       └──────────────────────┘      └────────────────────┘
+                                       │                              │
+                                       │ jaccl / ring (TB5)            │ direct MLX
+                                       ▼                              ▼
+                              ┌──────────────────┐         ┌──────────────────────┐
+                              │ Argo cluster     │         │ ~/.cache/huggingface │
+                              │ ultra-512 + 256× │         │ + ~/Library/...      │
+                              │ (.29-.32)         │         │                      │
+                              └──────────────────┘         └──────────────────────┘
+```
 
-| Resource | Why |
-|---|---|
-| [`ml-explore/mlx-swift-lm` README](https://github.com/ml-explore/mlx-swift-lm) | The library you're using. Look at the `ChatSession` example and the `LLMRegistry`. |
-| [`ml-explore/mlx-swift-examples` `Applications/MLXChatExample/`](https://github.com/ml-explore/mlx-swift-examples/tree/main/Applications/MLXChatExample) | A full Swift chat UI built on the same library. **Best concrete reference for how to load a model, stream tokens, manage state.** Skim Services/ and ViewModels/. |
-| `Libraries/MLXLLM/Models/*.swift` in `mlx-swift-lm` | The supported model architectures. Pre-verified : Qwen2 / Qwen3 / Qwen3MoE / Qwen3Next / Qwen35 / Qwen35MoE / Llama / Gemma / Gemma2 / Gemma3Text / Gemma4 / DeepseekV3 / GLM4 / GLM4MOE / MiniMax / Mistral3Text / Phi / Phi3 / PhiMoE / Starcoder2 / Olmo / SmolLM3 / OpenELM / Granite / Cohere / and ~20 more. |
-| [`Odyssai-eu/Odysseus` topology.example.yaml](https://github.com/Odyssai-eu/Odysseus/blob/main/config/topology.example.yaml) | How Telemak will be registered in an Odysseus cluster (`backend: http-proxy`, `upstream: http://this-mac:8002`). |
-| [`Odyssai-eu/Odysseus` API surface](https://github.com/Odyssai-eu/Odysseus/blob/main/docs/API.md) | The exact `/v1/chat/completions` request/response shape you must match (Odysseus uses the OpenAI spec verbatim). |
+Telemak is the leaf : one Mac, one (or a few) loaded models, HTTP in/out.
+Everything else (multi-cluster routing, conversation persistence, RAG,
+embeddings semantic router, …) lives upstream.
 
-## 2. Architecture decision — locked
+## 2. Repo layout
 
-These choices are decided. Don't relitigate them in MVP :
+```
+telemak/
+├── Package.swift                 # Swift 6.1 toolchain, mlx-swift 0.31.3, hummingbird 2.x
+├── Package.resolved              # Pins mlx-swift-lm to fork branch feat/v2-mtp-hidden-states
+├── Sources/
+│   ├── Telemak/                  # The CLI server binary
+│   │   ├── Telemak.swift         # ArgumentParser entry + version constant
+│   │   ├── Engine/               # MLX wiring (model loading, generation)
+│   │   │   ├── ModelRegistry.swift     # id → loaded ModelContainer
+│   │   │   ├── Generation.swift        # the actual mlx-swift-lm calls
+│   │   │   ├── Streaming.swift         # AsyncSequence<Token> → SSE
+│   │   │   └── MTP/                    # MTP speculative decoding (V2 work in progress)
+│   │   │       └── MTPSpeculativeIterator.swift
+│   │   └── Server/               # HTTP routes (Hummingbird)
+│   │       ├── Router.swift
+│   │       ├── ChatCompletions.swift
+│   │       ├── Models.swift
+│   │       ├── Admin.swift
+│   │       └── Capabilities.swift  # /.well-known/inference-engine.json
+│   └── TelemakMenuBar/           # The status menubar `.app` (separate target)
+├── Tests/                        # SwiftPM tests + integration helpers
+├── docs/
+│   ├── CODESIGNING.md            # The TCC re-prompt gotcha + how to sign stably
+│   ├── V1-BUG-stream-usage-chunk-missing.md
+│   ├── V1-BUG-thinking-and-reasoning-routing.md
+│   ├── V1-TODO.md
+│   ├── V1-UI-multi-model-dashboard.md
+│   └── V2-MTP-DRAFT-PORT.md      # The MTP port architecture (read for issue #34)
+├── scripts/
+│   ├── build.sh                  # Release build via xcodebuild
+│   ├── build-menubar-app.sh      # Wraps menubar into .app
+│   └── run.sh                    # Local dev
+├── dist/Telemak.app/             # Last menubar .app bundle (528K, just the wrapper)
+└── .xcbuild/                     # xcodebuild derived data (gitignored)
+```
 
-| Choice | Decision | Rationale |
+## 3. Build system — IMPORTANT
+
+### Use xcodebuild, not `swift build`
+
+This is the single most important gotcha. **`swift build` produces a binary
+that crashes at runtime** because it doesn't compile the Metal kernels
+mlx-swift needs. Use the script :
+
+```bash
+./scripts/build.sh Release         # produces .xcbuild/Build/Products/Release/telemak
+./scripts/build.sh Debug           # for development
+```
+
+The script wraps `xcodebuild -scheme Telemak-Package`. Output binaries land
+in `.xcbuild/Build/Products/{Release,Debug}/` :
+
+- `telemak` (~92 MB) — the CLI server. Statically embeds all mlx-swift libs.
+- `telemak-menubar` (~530 K) — the menubar app body.
+- `mlx-swift_Cmlx.bundle/` — Metal kernels. **MUST sit next to `telemak`
+  at runtime**, otherwise the runtime exits with a Metal load error.
+
+### Codesigning — TCC stability
+
+Release builds **must** be codesigned with a stable identity. macOS TCC
+(Full Disk Access, Removable Disks) keys grants by codesign cdhash. Without
+a stable identity, every rebuild → fresh cdhash → TCC re-prompts → the
+LaunchAgent boots before anyone clicks → service breaks.
+
+The signing identity used today is documented in
+[`docs/CODESIGNING.md`](docs/CODESIGNING.md). The build script signs
+automatically when `CONFIGURATION=Release`. Do NOT remove or alter that
+step.
+
+### Cross-repo : the `mlx-swift-lm` fork
+
+`Package.swift` pins **`Odyssai-eu/mlx-swift-lm` branch
+`feat/v2-mtp-hidden-states`**, not the upstream `ml-explore/mlx-swift-lm`.
+The fork lives at `~/Claude/code/mlx-swift-lm-odyssai/` on Sophie's
+workstation. It carries :
+
+- MTP speculative decoding scaffolding (the hidden-states surface needed
+  for MTP)
+- Patches to `Qwen35TextModel` / `Qwen35GatedDeltaNet` for SSM rollback
+  (in progress — see issue #34)
+- (Otherwise tracks upstream)
+
+When an issue says *"in the fork"*, it means a change to
+`mlx-swift-lm-odyssai`, not Telemak itself. After the fork change lands,
+Telemak's only follow-up is bumping the commit pin in `Package.swift` and
+`Package.resolved`.
+
+### Available mlx-swift-lm libraries
+
+`mlx-swift-lm-odyssai/Libraries/` provides :
+
+| Library | What it does | Telemak uses today ? |
 |---|---|---|
-| Language | **Swift 6** (toolchain available with Xcode 15+) | Required by mlx-swift-lm |
-| Inference library | **`mlx-swift-lm`** | Has every architecture in the Odysseus catalog (Qwen3MoE, Qwen3Next, Qwen35MoE, GLM4MOE, MiniMax, DeepseekV3, Gemma4, etc.) |
-| HTTP framework | **Hummingbird 2.x** | Lighter than Vapor, async-first, designed for server-side tasks ; minimal deps (no ORM, no auth-bundled). Vapor was considered and rejected — too much overhead for a single-purpose inference daemon. |
-| Build target | **CLI executable** for MVP (`swift build`) ; `.app` is V1 | Easier to test, debug, iterate. Menu-bar UI is a polish layer. |
-| Default port | **`:8002`** | `:8000` is taken by Odysseus orchestrator, `:8001` by odyssai-services. |
-| Tokenizer | What `mlx-swift-lm` ships (`huggingface/swift-transformers` under the hood) | No need to re-implement. |
-| Streaming protocol | **SSE** (`data: {...}\n\ndata: [DONE]\n\n`), OpenAI-compatible | Companion and the SDKs already speak this. |
-| Streaming primitive in Swift | `AsyncSequence<Token>` from `ChatSession` → Hummingbird streaming `ResponseBody` | mlx-swift-lm exposes this natively. |
-| Concurrency | One request at a time in MVP (single inference at any moment, serialize with an actor or single async task) | Multi-request queueing is V1+. |
-| Config file | TOML or YAML, at `~/.telemak/config.yaml` | Single file ; deferred-decision : whichever is easier with Swift std/Foundation. Default to TOML if no preference, smaller dep footprint. |
-| Model loading | On-demand via `/admin/load`, NO startup-load | Mirror Odysseus admin API — operators bring models up explicitly. |
+| MLXLLM | Causal LMs (Qwen, Gemma, Llama, GLM, MiniMax, DeepSeek, …) | ✅ yes — primary |
+| MLXLMCommon | Shared types | ✅ yes |
+| MLXEmbedders | Embedding models (bert/roberta/nomic/qwen3/gemma3) | ❌ not yet — issue #37 |
+| MLXVLM | Vision-language models (16 archis : Qwen35MoE, Qwen3VL, FastVLM, Gemma3, …) | ❌ not yet — issue #36 |
+| MLXHuggingFace + Macros | HF Hub fetch | ✅ yes (transitive) |
 
-If you find yourself wanting to deviate, write a one-paragraph proposal and ask the user first.
+The plan is to consolidate `mlx-coder` (Python), `mlx-embed` (Python) and
+`mlx-vlm` (Python) onto Telemak, so a single Swift process owns local
+inference on max-64. Issues #37 and #36 track that.
 
-## 3. MVP scope — six phases
+## 4. Deploy — how Telemak runs in production
 
-The MVP target is **"`curl localhost:8002/v1/chat/completions` returns a streaming SSE response from a Qwen3 dense model."** Everything past that is V1.
+Production host : **`max-64.lan`** (192.168.86.50, M3 Max 64 GB). Currently
+also planned for `ultra-96a.lan` (192.168.86.49, M3 Ultra 96 GB) — issue
+#38 tracks turning the deploy into a one-click DMG installer.
 
-| # | Phase | Deliverable | Time est. | Done when |
-|---|---|---|---|---|
-| 0 | **Scaffolding** | Swift package `Telemak`, deps `mlx-swift-lm` + `Hummingbird`, builds `swift run telemak --version` | ½ day | The binary prints a version string |
-| 1 | **Load + generate** | Load `mlx-community/Qwen3-7B-MLX-8bit` (or smaller for first iteration) from the local HF cache, generate 50 tokens, print them | ½ day | `swift run telemak smoke "hello world"` prints a coherent completion to stdout |
-| 2 | **HTTP non-streamed** | Hummingbird app on `:8002`, `POST /v1/chat/completions` returns a single complete JSON response | 1 day | `curl -d '{"model":"...", "messages":[...]}' http://localhost:8002/v1/chat/completions` returns OpenAI-shaped JSON |
-| 3 | **Streaming SSE** | Same endpoint with `"stream": true`, token-by-token deltas | ½ day | `curl --no-buffer ...` shows tokens arriving progressively |
-| 4 | **Odysseus integration** | Register Telemak as a cluster in `topology.yaml` (`backend: http-proxy`, `upstream: http://<this-mac>:8002`). Verify Companion → Odysseus → Telemak path works. | ½ day | A Companion message routed to this cluster gets answered by Telemak |
-| 5 | **/v1/models + /admin/load + /admin/unload** | List loaded models ; load/unload at runtime without restart | 1 day | A second model can be loaded after the first, then unloaded, then a third loaded — all without restart |
+### Layout on the host
 
-**Total V0 (phases 0-3) : ~2.5 days.** Total integrated MVP (0-5) : ~4 days.
+```
+~/telemak/Release/
+├── telemak                      # CLI binary
+├── telemak-menubar              # menubar binary
+└── mlx-swift_Cmlx.bundle/       # Metal kernels (REQUIRED)
 
-Phases run sequentially. Do not start phase N+1 until phase N has a passing smoke test that the user has seen.
+~/Library/LaunchAgents/
+├── eu.odyssai.telemak.plist
+└── application.eu.odyssai.telemak.menubar.<...>.plist
+```
 
-## 4. Phase 0 — Scaffolding (start here)
-
-### 4.1 Create the Swift package
+### Deploy from workstation
 
 ```bash
-cd /Users/sophie/Claude/code/telemak
-swift package init --type executable --name Telemak
+./scripts/build.sh Release                                        # builds locally
+scp -r .xcbuild/Build/Products/Release/{telemak,telemak-menubar,mlx-swift_Cmlx.bundle} \
+    admin@<host>:telemak/Release/                                 # ship
+ssh admin@<host> 'launchctl kickstart -k gui/$(id -u)/eu.odyssai.telemak'   # bounce
+curl -s http://<host>:8003/health                                 # smoke
 ```
 
-This creates `Package.swift`, `Sources/Telemak/Telemak.swift`, `Tests/`.
+The current LaunchAgent definition is implicit (already on the host).
+Issue #38 will formalise this with a proper installer DMG.
 
-### 4.2 Add dependencies to Package.swift
+### What's NOT deployed
 
-Edit `Package.swift` so it looks roughly like :
+- Tests (`Tests/`) — local-only.
+- Source (`Sources/`, `Package.swift`) — local-only ; binary-only deploy.
+- `.xcbuild/` — gitignored, regenerated per build.
 
-```swift
-// swift-tools-version: 5.9
-import PackageDescription
+## 5. HTTP API — what Telemak exposes
 
-let package = Package(
-    name: "Telemak",
-    platforms: [.macOS(.v14)],
-    products: [
-        .executable(name: "telemak", targets: ["Telemak"]),
-    ],
-    dependencies: [
-        .package(url: "https://github.com/ml-explore/mlx-swift-lm", from: "0.30.0"),
-        .package(url: "https://github.com/hummingbird-project/hummingbird", from: "2.0.0"),
-        .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
-    ],
-    targets: [
-        .executableTarget(
-            name: "Telemak",
-            dependencies: [
-                .product(name: "MLXLLM", package: "mlx-swift-lm"),
-                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
-                .product(name: "Hummingbird", package: "hummingbird"),
-                .product(name: "ArgumentParser", package: "swift-argument-parser"),
-            ]
-        ),
-        .testTarget(
-            name: "TelemakTests",
-            dependencies: ["Telemak"]
-        ),
-    ]
-)
-```
+The full contract is at `Sources/Telemak/Server/`. Highlights :
 
-> **Version pinning** : check the latest tagged release of `mlx-swift-lm` at https://github.com/ml-explore/mlx-swift-lm/releases before committing the version range above — these numbers are approximate. The exact version may have moved by the time you read this.
-
-### 4.3 Smoke build
-
-```bash
-swift build
-swift run telemak --version
-```
-
-If `swift build` fails on a missing platform or Swift version, raise to the user — don't downgrade dependencies silently.
-
-### 4.4 Project layout (recommended)
-
-```
-Telemak/
-├── Package.swift
-├── Sources/Telemak/
-│   ├── main.swift             # ArgumentParser entry, dispatches subcommands
-│   ├── CLI/
-│   │   ├── ServeCommand.swift # `telemak serve` — runs the HTTP server
-│   │   └── SmokeCommand.swift # `telemak smoke "<prompt>"` — phase 1 offline test
-│   ├── Server/
-│   │   ├── Router.swift       # Hummingbird routes wiring
-│   │   ├── ChatCompletions.swift   # /v1/chat/completions
-│   │   ├── Models.swift            # /v1/models
-│   │   └── Admin.swift             # /admin/load, /admin/unload
-│   ├── Engine/
-│   │   ├── ModelRegistry.swift     # Maps requested model id → loaded ModelContainer
-│   │   ├── Generation.swift        # The actual mlx-swift-lm calls (load, generate)
-│   │   └── Streaming.swift         # AsyncSequence<Token> → SSE bytes
-│   └── Types/
-│       ├── ChatRequest.swift       # Codable OpenAI request shape
-│       └── ChatResponse.swift      # Codable OpenAI response shape (incl. delta)
-└── Tests/TelemakTests/
-    └── ChatCompletionsTests.swift  # Hummingbird test client + golden responses
-```
-
-This layout is a *recommendation*, not law. Keep it flat enough that the code is readable.
-
-## 5. Phase 1 — Load + generate offline
-
-Goal : prove the library works on this Mac, with a real model, before involving HTTP.
-
-```bash
-# Pre-flight: ensure a model is in the local HF cache
-huggingface-cli download mlx-community/Qwen3-7B-MLX-8bit \
-  --local-dir ~/mlx-models/mlx-community/Qwen3-7B-MLX-8bit
-# (or whatever cache strategy mlx-swift-lm uses — check its docs)
-
-# Test
-swift run telemak smoke "Hello, who are you?"
-# → expect a coherent completion of 30-100 tokens on stdout
-```
-
-`SmokeCommand.swift` should use the simplest possible path :
-
-```swift
-import MLXLLM
-import MLXLMCommon
-
-let model = try await loadModelContainer(...)   // see mlx-swift-lm docs for exact API
-let session = ChatSession(model)
-let response = try await session.respond(to: prompt)
-print(response)
-```
-
-If the load fails because the model isn't in the cache, print a clear error pointing at `huggingface-cli download`. Do not auto-download in phase 1 — keep failure modes obvious.
-
-## 6. Phase 2 — HTTP non-streamed
-
-Implement `POST /v1/chat/completions` returning a single JSON response (no streaming yet). Reference shape :
-
-**Request** :
-```json
-{
-  "model": "mlx-community/Qwen3-7B-MLX-8bit",
-  "messages": [
-    {"role": "system", "content": "You are helpful."},
-    {"role": "user", "content": "Say hello."}
-  ],
-  "stream": false,
-  "max_tokens": 256,
-  "temperature": 0.7
-}
-```
-
-**Response** (OpenAI shape, abbreviated) :
-```json
-{
-  "id": "chatcmpl-<uuid>",
-  "object": "chat.completion",
-  "created": 1700000000,
-  "model": "mlx-community/Qwen3-7B-MLX-8bit",
-  "choices": [{
-    "index": 0,
-    "message": {"role": "assistant", "content": "Hello!"},
-    "finish_reason": "stop"
-  }],
-  "usage": {"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15}
-}
-```
-
-The Odysseus repo's `scripts/api.py` has the canonical response shape — match it byte-for-byte where you can. Companion is strict about the shape.
-
-Test :
-```bash
-curl -X POST http://localhost:8002/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"mlx-community/Qwen3-7B-MLX-8bit","messages":[{"role":"user","content":"Hello"}],"stream":false}'
-```
-
-## 7. Phase 3 — Streaming SSE
-
-Same endpoint, with `"stream": true` in the request. Emit :
-
-```
-data: {"id":"chatcmpl-x","object":"chat.completion.chunk","created":..., "model":"...", "choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
-
-data: {"id":"chatcmpl-x","object":"chat.completion.chunk","created":..., "model":"...", "choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
-
-data: {"id":"chatcmpl-x","object":"chat.completion.chunk","created":..., "model":"...", "choices":[{"index":0,"delta":{"content":"!"},"finish_reason":null}]}
-
-data: {"id":"chatcmpl-x","object":"chat.completion.chunk","created":..., "model":"...", "choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
-
-data: [DONE]
-```
-
-Hummingbird supports streaming responses via `ResponseBody` (chunked). `ChatSession` in `mlx-swift-lm` exposes the per-token stream as an `AsyncSequence` — wire one into the other.
-
-Test :
-```bash
-curl --no-buffer -N -X POST http://localhost:8002/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"...","messages":[...],"stream":true}'
-# Tokens should appear progressively, not all at once.
-```
-
-## 8. Phase 4 — Odysseus integration
-
-You don't modify Odysseus. You add a cluster entry to the operator's `~/.odysseus/topology.yaml` :
-
-```yaml
-clusters:
-  default:
-    label: "Argo (distributed)"
-    backend: jaccl
-    # ... existing nodes …
-
-  telemak-test:               # ← new
-    label: "Telemak (single-node)"
-    backend: http-proxy
-    upstream: http://<this-mac-host>:8002
-    pools:
-      - size: 1
-        nodes:
-          - rank: 0
-            id: telemak
-            ssh: admin@<this-mac-host>     # SSH is still required by Odysseus for health probes
-```
-
-> Verify the exact field names with the live `config/topology.example.yaml` in the Odysseus repo — the schema may have evolved since this doc was written.
-
-Then test :
-```bash
-curl -X POST http://<odysseus-host>:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"telemak-test","messages":[{"role":"user","content":"Hello"}]}'
-# Should be proxied through Odysseus to Telemak and return.
-```
-
-If Companion is configured to point at Odysseus, the `telemak-test` cluster will appear in its cluster list automatically.
-
-## 9. Phase 5 — /v1/models + /admin/load + /admin/unload
-
-Mirror the Odysseus admin pattern :
-
-- `GET /v1/models` → list of `{id, object: "model", created, owned_by}` entries for currently loaded models
-- `POST /admin/load` `{"model": "<hf-repo>"}` → load a model into the engine (the requested model becomes available for `/v1/chat/completions`)
-- `POST /admin/unload` `{"model": "<hf-repo>"}` → unload a model (frees memory)
-
-A single Telemak process holds **one** loaded model at a time in MVP. Loading a different model unloads the previous one. (Multi-model concurrent is V1.)
-
-Operators address Telemak directly via these endpoints OR via Odysseus's `/admin/clusters/<id>/load` (which proxies through).
-
-## 10. Out of scope for MVP — do not implement these
-
-| Item | Why deferred |
+| Endpoint | What it does |
 |---|---|
-| Anthropic `/v1/messages` API | Not required to integrate with Odysseus (which converts at its layer). V1. |
-| KV prefix cache (session_id reuse across turns) | Significant work, mlx-swift-lm exposes KVCache but the cross-request session pattern is non-trivial. V2. |
-| Capability contract (`/.well-known/inference-engine.json`) | Odysseus can hardcode the assumed capabilities of Telemak for V0. V1. |
-| Multi-request concurrency | Single-flight is fine for V0. V1. |
-| Tools / function calling | Requires chat-template-level work. V1. |
-| Bonjour LAN discovery | Operator writes the IP in topology.yaml. V2. |
-| Menu bar `.app` UI | CLI is sufficient for V0 demonstration. V1. |
-| Apple notarization / codesigning | Required for distribution but not for local dev / testing. V1. |
-| `.app` installer / drag-and-drop | Same as above. V1. |
-| Sampling params beyond temperature / top_p / max_tokens | Stop sequences, repetition_penalty, etc. are V1. |
-| Token usage / billing metrics | V1. |
-| Logging to file with rotation | Stdout is fine for V0. V1. |
-| App Store distribution | Far future. |
+| `POST /v1/chat/completions` | OpenAI-compatible chat. Supports `stream:true` for SSE. |
+| `POST /v1/messages` | Anthropic-compatible chat (basic). |
+| `GET /v1/models` | Lists currently loaded models with capabilities. |
+| `POST /admin/load` `{"model":"hf-id"}` | Load a model into memory. One concurrent at a time today. |
+| `POST /admin/unload` `{"model":"hf-id"}` | Unload + free wired memory. |
+| `GET /admin/api/global-settings` | Runtime settings (KV cache size, enable_thinking defaults, …). |
+| `POST /admin/api/global-settings` | Update runtime settings. Some settings are runtime-applied, some need restart — check the response `runtime_applied` field. |
+| `GET /.well-known/inference-engine.json` | Capability contract. Tells Odysseus what tools/vision/json-mode this engine supports. |
+| `GET /health` | Liveness probe. Returns 200 + version. |
 
-If the user explicitly asks for one of these mid-MVP, stop and confirm — they're scope creep.
+The shapes are kept byte-compatible with Odysseus' `scripts/api.py`. When
+in doubt, **Odysseus is the source of truth for what Companion expects** —
+match it.
 
-## 11. Done criteria for the MVP
+## 6. Current state — what works, what's in flight
 
-Telemak V0 is **done** when, on a single Mac with a model in `~/.cache/huggingface/hub/` :
+### What works in production today
 
-1. `swift run telemak serve` starts the HTTP server on `:8002` in under 5 seconds (cold start, before any model load)
-2. `POST /admin/load` with a valid model id loads the model (cold load ~30 s for a 7B-8bit) and returns success
-3. `POST /v1/chat/completions` (non-streaming) returns a coherent OpenAI-shaped JSON response in under 5 s for a 100-token completion
-4. `POST /v1/chat/completions` (streaming) emits the first token in under 1 s
-5. Adding `telemak-test` as a `backend: http-proxy` cluster in Odysseus' `topology.yaml` makes the model reachable via Odysseus' OpenAI surface
-6. `GET /v1/models` lists the loaded model
-7. `POST /admin/unload` frees the model and unallocates the wired memory
+- ✅ Chat completion (streaming + non-streaming) on Qwen3, Qwen3MoE,
+  Qwen3.5, Qwen3.5MoE, Qwen3.6, Gemma3/4, GLM4MoE, DeepSeek, MiniMax,
+  Mistral3 — basically every model architecture in `MLXLLM`.
+- ✅ `/admin/load` + `/admin/unload` runtime model swap.
+- ✅ Capability contract at `/.well-known/inference-engine.json` (used by
+  Odysseus to negotiate features).
+- ✅ Codesigning + LaunchAgent on max-64 — service survives reboots.
+- ✅ KV cache (per-conversation prefix reuse) — sessions stay warm across
+  turns.
+- ✅ MTP V1 iterator (`MTPSpeculativeIterator.swift`) shipped in issue #29
+  / PR #32. **But the acceptance rate collapses on Qwen3.5/3.6 because SSM
+  rollback is missing** — see issue #34.
 
-All seven, end-to-end, observed by the user.
+### What's in flight (open issues, ordered by where dev should start)
 
-## 12. When you get blocked
+| # | Title | Labels | Difficulty |
+|---|---|---|---|
+| **#34** | V2 Step 2 — `rollback_speculative_cache` in mlx-swift-lm fork (SSM state) | `ready` | 8 |
+| **#37** | feat(embeddings) : `/v1/embeddings` endpoint backed by `MLXEmbedders` | `ready` | 3 |
+| **#36** | feat(vlm) : real image input on `/v1/messages` + `/v1/chat/completions` | `ready` | 5 |
+| **#35** | V2 Step 4 — wire `MTPSpeculativeIterator` into `/v1/chat/completions` + `/v1/messages` | `blocked` (by #34) | 3 |
+| **#38** | feat(installer) : one-click DMG installer for non-dev machines | `enhancement` (not ready yet) | 8 |
 
-- **`swift build` fails with cryptic linker errors** → check Xcode CLT version, ensure Swift 5.9+, check that mlx-swift-lm has a tagged release compatible with your Swift toolchain
-- **Model load fails with "not found"** → check the cache path mlx-swift-lm expects. Look at MLXChatExample's `Services/ModelService.swift` (or wherever it loads from) for the canonical pattern
-- **Streaming chunks arrive in batches, not per-token** → likely a Hummingbird response-body flush issue. Check that you're calling the equivalent of `Flush()` after each chunk, or that the framework's streaming body type is the right one (not `ByteBuffer`-collected)
-- **Response shape diverges from OpenAI by a small field** → match Odysseus byte-for-byte. The `scripts/api.py` in the Odysseus repo is the source of truth for what Companion expects
-- **The model architecture you want isn't in `Libraries/MLXLLM/Models/`** → it probably is, double-check the architecture name in the model's `config.json`. If genuinely missing, raise to user — porting an architecture is V1+, not MVP
+**Pick the lowest-numbered `ready` issue first**, unless the priority label
+disagrees (`bug` > `enhancement`). #34 is the highest-impact ready item
+(unblocks MTP perf, unblocks #35).
 
-## 13. Tell the user when you're done
+### What's deferred (out of scope until further notice)
 
-When the 7 done-criteria above all pass, post this to the user :
+- Bonjour LAN auto-discovery (operator still writes IP in `topology.yaml`)
+- Apple notarization (still ad-hoc signed)
+- App Store distribution
+- Multi-request concurrent inference (single-flight today)
+- Auto-update mechanism (Sparkle)
+- Multi-version side-by-side install
 
-> Telemak MVP V0 is up. The binary at `<path>` serves `/v1/chat/completions`
-> (streaming and non-streaming) on `:8002`. A loaded model responds in
-> `<X>` seconds first-token, `<Y>` tok/s steady-state on this Mac
-> (`<host>`, `<chip>`, `<RAM>`). Registered as cluster `telemak-test` in
-> Odysseus' topology — Companion sees it and chats successfully.
->
-> Next : V1 should pick up [list your top 2-3 follow-ups : Anthropic API,
-> KV cache, .app bundle, …].
+## 7. Workflow — how to ship
 
-Then stop. The user takes the next decision.
+### Direct push to `main`, no PR
+
+As of **2026-05-25 night** (see `~/.claude/CLAUDE.md`), the project uses
+direct push to main. No feature branches, no PR review. Rationale : on a
+solo-operator-plus-one-agent stack, PR review added friction without
+catching bugs, and divergence between deployed code and `main` became a
+recurring incident.
+
+The new invariant : **"ce qui est sur le serveur = ce qui est sur main."**
+Deploy follows the commit in the same session.
+
+### Per-issue cycle
+
+```
+1. gh issue list --label ready → pick lowest open
+2. Read the issue + Reading order docs cold
+3. git checkout main; git pull
+4. Implement on main directly (no branch)
+5. Smoke / test the deployed runtime
+6. Commit + push (one coherent commit per issue when possible)
+7. Deploy in the same session (scp + launchctl kickstart, see §4)
+8. Comment on the issue with the recap + smoke output
+9. Issue auto-closes via `Closes #N` in the commit body
+```
+
+### Commit conventions — strict
+
+Commits ARE the audit trail now that PRs are gone. The format is enforced :
+
+```
+$kind($scope): $short imperative title
+
+Closes #$N.
+
+$2-4 lines of body describing what landed and why.
+
+Difficulty: $N delivered (issue estimated $original-N).
+Smoke: $command → $short observation
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+
+Rules :
+
+- **Conventional Commits prefix** : `feat:`, `fix:`, `chore:`, `docs:`,
+  `perf:`, `refactor:`. The optional `($scope)` is `mtp`, `vlm`, `embed`,
+  `server`, `engine`, `build`, etc.
+- **HEREDOC** for the body (multi-line commit messages).
+- **`Closes #N`** so the issue auto-closes on push to main.
+- **`Difficulty: N delivered`** line — used for velocity tracking.
+- **`Co-Authored-By:`** footer — adapt to which model you're running on.
+  For Codex : `Co-Authored-By: Codex (GPT-X) <noreply@openai.com>`.
+- **NEVER `--no-verify`** — pre-commit hooks exist for a reason.
+
+### Difficulty estimates — Fibonacci, never time
+
+Per `~/.claude/CLAUDE.md`. Time estimates were wrong systematically.
+Estimate in Fibonacci scrum points : 1 / 2 / 3 / 5 / 8 / 13 / 21.
+
+| Points | Sense |
+|---|---|
+| 1 | one-line patch, rename, toggle. |
+| 2 | small — 1-2 loops, one file mostly. |
+| 3 | medium — clear scope, a few files. |
+| 5 | bigger — multi-file, design decisions to make. |
+| 8 | large — full feature, several modules. Usually break down further. |
+| 13 | very large — break into sub-issues before committing. |
+| 21 | epic — almost never. If you reach 21, the scope is wrong. |
+
+The commit's `Difficulty: N delivered` line is what counts for velocity.
+
+## 8. Smoke / verify — how to know it works
+
+After every deploy, run these against the live host :
+
+```bash
+HOST=max-64.lan   # or ultra-96a.lan, or wherever you deployed
+
+# 1. Health
+curl -s http://$HOST:8003/health
+# → {"status":"ok","version":"0.2.0"}
+
+# 2. Loaded models
+curl -s http://$HOST:8003/v1/models | jq '.data[].id'
+
+# 3. Capability contract
+curl -s http://$HOST:8003/.well-known/inference-engine.json | jq
+
+# 4. Non-streaming chat
+curl -s -X POST http://$HOST:8003/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"<loaded-id>","messages":[{"role":"user","content":"hi"}],"stream":false,"max_tokens":20}'
+
+# 5. Streaming chat
+curl -N -X POST http://$HOST:8003/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"<loaded-id>","messages":[{"role":"user","content":"count to 5"}],"stream":true,"max_tokens":40}'
+
+# 6. Companion → Odysseus → Telemak round-trip (full integration smoke)
+# Sophie validates from the Companion UI ; mention it in your commit body.
+```
+
+If any of these fail after your deploy, **revert the commit on main and
+redeploy the prior build** — don't leave the service broken. The
+invariant must hold.
+
+## 9. When to escalate — `needs-human` label
+
+Add the `needs-human` label and **stop** when :
+
+- An issue depends on a change in `mlx-swift-lm-odyssai` AND the fork
+  doesn't have an obvious bump path (e.g. needs Sophie's call on
+  upstream rebase).
+- A model's chat template breaks `<|im_end|>` parsing or similar
+  template ambiguity — chat-template work is fiddly and Sophie wants
+  to see those.
+- A change would alter the HTTP API surface (`/v1/chat/completions`
+  shape) — Companion + Odysseus need to know.
+- A change would touch macOS TCC / codesigning / LaunchAgent setup —
+  these are physical-presence-required changes on the host.
+- Two valid implementations exist and you can't tell which Sophie
+  prefers.
+- Cost / runtime ceiling hit on a long-running task.
+
+Tag, comment with the specific question, stop. PO will pick it up and
+either resolve or dispatch to Sophie.
+
+## 10. Cross-repo links — when something points elsewhere
+
+- **Odysseus** : `~/Claude/code/MLX Distributed/` (or
+  `https://github.com/Odyssai-eu/Odysseus`). The orchestrator. Read
+  `scripts/api.py` if you need the exact response shape Companion expects.
+- **Companion** : `~/Claude/code/thecompai/app/` (private repo, currently
+  `https://github.com/thecompai/app`). The chat UI. Read
+  `server/routes/chat.ts` if you change how tools/reasoning interleave.
+- **mlx-swift-lm-odyssai** : `~/Claude/code/mlx-swift-lm-odyssai/` (fork
+  at `https://github.com/Odyssai-eu/mlx-swift-lm`). Sophie's fork of
+  `ml-explore/mlx-swift-lm`. Issue #34 touches this fork, not Telemak.
+- **odyssai-services** : sibling cockpit container, `mini-i3:8001`. Hosts
+  the bench tool. Use it to measure tok/s changes after MTP work lands.
+- **Obsidian wiki** : `~/Claude/code/odyssai-wiki/` — cross-repo concept
+  notes. Articles relevant to Telemak : `[[telemak-runtime]]`,
+  `[[http-api-contract]]`, `[[topology-yaml]]`, `[[http-proxy]]`,
+  `[[mtp-speculative-decoding]]`.
+
+## 11. Concrete onboarding steps for a fresh agent
+
+If you've never seen this repo before, do this in order :
+
+1. **Read this file** (you're here) — top to bottom.
+2. **Read `docs/V2-MTP-DRAFT-PORT.md`** — the active design doc for MTP.
+3. **Skim `Sources/Telemak/Server/Router.swift`** — see all routes.
+4. **Skim `Sources/Telemak/Engine/ModelRegistry.swift`** — see how models
+   are loaded.
+5. **Read `Package.resolved`** — verify the fork pin matches what
+   `scripts/build.sh` builds against.
+6. **Read the open `ready` issues** : `gh issue list --label ready` then
+   `gh issue view <N>` for each.
+7. **Build locally** : `./scripts/build.sh Debug && .xcbuild/Build/Products/Debug/telemak --version`. Confirm `0.2.0` (or whatever the current source says).
+8. **Curl the live host** (`max-64.lan:8003`) — see §8 — confirm the
+   prod runtime matches what you just built. If it doesn't, that's your
+   first task : align deploy with main.
+
+After that, you're ready to pick an issue.
+
+## 12. Don't
+
+- Don't `swift build` — use `./scripts/build.sh`.
+- Don't deploy without codesigning (Release builds, see §3).
+- Don't open a PR (workflow is direct push to main, see §7).
+- Don't add new HTTP endpoints without checking Companion + Odysseus
+  consumers first.
+- Don't bump the `mlx-swift-lm` fork without testing locally — runtime
+  Metal errors don't always show up at build time.
+- Don't write time estimates — Fibonacci points only.
+- Don't leave the deployed runtime broken — revert the commit if smoke
+  fails, ship a follow-up.
+
+## 13. When you're done with an issue
+
+Comment on the issue :
+
+```markdown
+Shipped on main as $commit-hash, deployed to $host.
+
+$brief description of what landed.
+
+Smoke : $command → $observation
+Difficulty: $N delivered.
+```
+
+That seals the issue (which auto-closed via `Closes #N` on push). Move on
+to the next `ready` issue. If the backlog is empty, idle until the PO
+files more or Sophie dispatches something.
