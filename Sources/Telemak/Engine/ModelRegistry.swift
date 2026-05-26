@@ -1,4 +1,5 @@
 import Foundation
+import MLXEmbedders
 import MLXLMCommon
 
 /// Holds N loaded models, allowing concurrent inference on different models.
@@ -37,8 +38,16 @@ public actor ModelRegistry {
         public let ramEstimateBytes: Int64
     }
 
+    public struct LoadedEmbedder: Sendable {
+        public let id: String
+        public let container: EmbedderModelContainer
+        public let loadedAt: Date
+        public let ramEstimateBytes: Int64
+    }
+
     private var entries: [String: Loaded] = [:]
     private var draftEntries: [String: LoadedDraft] = [:]
+    private var embedderEntries: [String: LoadedEmbedder] = [:]
     /// `mainId → draftId`. Each main model can have ≤ 1 paired draft.
     private var pairing: [String: String] = [:]
     private let stateStore: StateStore?
@@ -59,21 +68,25 @@ public actor ModelRegistry {
 
     public var loadedModelIds: [String] { entries.keys.sorted() }
     public var loadedModels: [Loaded] { entries.values.sorted { $0.id < $1.id } }
+    public var loadedEmbedders: [LoadedEmbedder] { embedderEntries.values.sorted { $0.id < $1.id } }
 
     public func get(_ id: String) -> Loaded? { entries[id] }
+    public func getEmbedder(_ id: String) -> LoadedEmbedder? { embedderEntries[id] }
 
-    public func contains(_ id: String) -> Bool { entries[id] != nil }
+    public func contains(_ id: String) -> Bool { entries[id] != nil || embedderEntries[id] != nil }
 
     public func usedRamBytes() -> Int64 {
         let mainBytes = entries.values.reduce(0) { $0 + $1.ramEstimateBytes }
         let draftBytes = draftEntries.values.reduce(0) { $0 + $1.ramEstimateBytes }
-        return mainBytes + draftBytes
+        let embedderBytes = embedderEntries.values.reduce(0) { $0 + $1.ramEstimateBytes }
+        return mainBytes + draftBytes + embedderBytes
     }
 
     public func perModelRamBytes() -> [String: Int64] {
         var out: [String: Int64] = [:]
         for (id, entry) in entries { out[id] = entry.ramEstimateBytes }
         for (id, entry) in draftEntries { out[id] = entry.ramEstimateBytes }
+        for (id, entry) in embedderEntries { out[id] = entry.ramEstimateBytes }
         return out
     }
 
@@ -126,7 +139,7 @@ public actor ModelRegistry {
                 neededBytes: neededBytes,
                 availableBytes: max(0, ceiling - usedBytes),
                 ceilingBytes: ceiling,
-                currentlyLoaded: loadedModelIds
+                currentlyLoaded: loadedModelIds + embedderEntries.keys.sorted() + draftEntries.keys.sorted()
             )
         }
 
@@ -153,6 +166,43 @@ public actor ModelRegistry {
         }
         await persistState()
         Self.dbg("persistState done id=\(id) total_wall=\(Date().timeIntervalSince(estimateStart))s")
+        return container
+    }
+
+    @discardableResult
+    public func loadEmbedder(_ id: String) async throws -> EmbedderModelContainer {
+        if let existing = embedderEntries[id] {
+            return existing.container
+        }
+        let neededBytes = RamBudget.estimate(modelId: id) ?? 0
+        let usedBytes = usedRamBytes()
+        let ceiling = RamBudget.ceilingBytes()
+
+        if neededBytes > 0, ceiling > 0, usedBytes + neededBytes > ceiling {
+            throw LoadError.insufficientMemory(
+                neededBytes: neededBytes,
+                availableBytes: max(0, ceiling - usedBytes),
+                ceilingBytes: ceiling,
+                currentlyLoaded: loadedModelIds + embedderEntries.keys.sorted() + draftEntries.keys.sorted()
+            )
+        }
+
+        let container: EmbedderModelContainer
+        do {
+            container = try await EmbedderLoader.load(identifier: id)
+        } catch {
+            throw LoadError.loadFailed(underlying: "\(error)")
+        }
+        embedderEntries[id] = LoadedEmbedder(
+            id: id,
+            container: container,
+            loadedAt: Date(),
+            ramEstimateBytes: neededBytes
+        )
+        if neededBytes > 0 {
+            await wiredMemory?.reserveModel(id, weightBytes: Int(neededBytes))
+        }
+        await persistState()
         return container
     }
 
@@ -248,15 +298,21 @@ public actor ModelRegistry {
             await persistState()
             return true
         }
+        if embedderEntries.removeValue(forKey: id) != nil {
+            await wiredMemory?.endReservation(id)
+            await persistState()
+            return true
+        }
         return false
     }
 
     /// Unload everything (admin convenience). Clears all sessions, all
     /// drafts, all pairings.
     public func unloadAll() async -> [String] {
-        let ids = Array(entries.keys) + Array(draftEntries.keys)
+        let ids = Array(entries.keys) + Array(draftEntries.keys) + Array(embedderEntries.keys)
         entries.removeAll()
         draftEntries.removeAll()
+        embedderEntries.removeAll()
         pairing.removeAll()
         for id in ids {
             await wiredMemory?.endReservation(id)

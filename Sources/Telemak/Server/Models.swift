@@ -40,6 +40,18 @@ struct ModelsHandler: Sendable {
             let object: String
             let created: Int
             let owned_by: String
+            let xTelemak: ModelExt
+
+            enum CodingKeys: String, CodingKey {
+                case id
+                case object
+                case created
+                case owned_by
+                case xTelemak = "x_telemak"
+            }
+        }
+        struct ModelExt: Encodable {
+            let kind: String
         }
         struct ModelList: Encodable {
             let object: String
@@ -47,14 +59,26 @@ struct ModelsHandler: Sendable {
         }
 
         let loaded = await registry.loadedModels
-        let entries = loaded.map {
+        let embedders = await registry.loadedEmbedders
+        let llmEntries = loaded.map {
             ModelEntry(
                 id: $0.id,
                 object: "model",
                 created: Int($0.loadedAt.timeIntervalSince1970),
-                owned_by: "telemak"
+                owned_by: "telemak",
+                xTelemak: .init(kind: "llm")
             )
         }
+        let embedderEntries = embedders.map {
+            ModelEntry(
+                id: $0.id,
+                object: "model",
+                created: Int($0.loadedAt.timeIntervalSince1970),
+                owned_by: "telemak",
+                xTelemak: .init(kind: "embedder")
+            )
+        }
+        let entries = (llmEntries + embedderEntries).sorted { $0.id < $1.id }
         let payload = ModelList(object: "list", data: entries)
         let data = try JSONEncoder().encode(payload)
         return jsonResponse(.ok, data: data)
@@ -114,21 +138,48 @@ struct ModelsHandler: Sendable {
             return jsonError(.badRequest, code: "invalid_request_error",
                               message: "expected {\"model\": \"<id>\", \"draft_model\": \"<id?>\"}: \(error)")
         }
-        do {
-            _ = try await registry.load(body.model)
-        } catch ModelRegistry.LoadError.insufficientMemory(let needed, let available, let ceiling, let currentlyLoaded) {
-            return insufficientMemoryError(
-                neededBytes: needed,
-                availableBytes: available,
-                ceilingBytes: ceiling,
-                currentlyLoaded: currentlyLoaded
-            )
-        } catch ModelRegistry.LoadError.loadFailed(let why) {
-            return jsonError(.serviceUnavailable, code: "model_load_failed",
-                              message: "could not load model '\(body.model)': \(why)")
-        } catch {
-            return jsonError(.serviceUnavailable, code: "model_load_failed",
-                              message: "could not load model '\(body.model)': \(error)")
+        let isEmbedder = EmbedderLoader.isEmbedder(identifier: body.model)
+        if isEmbedder {
+            if let draftId = body.draft_model, !draftId.isEmpty {
+                return jsonError(.badRequest, code: "invalid_request_error",
+                                  message: "draft_model is only valid for chat models")
+            }
+            do {
+                _ = try await registry.loadEmbedder(body.model)
+            } catch ModelRegistry.LoadError.insufficientMemory(let needed, let available, let ceiling, let currentlyLoaded) {
+                return insufficientMemoryError(
+                    neededBytes: needed,
+                    availableBytes: available,
+                    ceilingBytes: ceiling,
+                    currentlyLoaded: currentlyLoaded
+                )
+            } catch ModelRegistry.LoadError.loadFailed(let why) {
+                return jsonError(.serviceUnavailable, code: "model_load_failed",
+                                  message: "could not load embedder '\(body.model)': \(why)")
+            } catch {
+                return jsonError(.serviceUnavailable, code: "model_load_failed",
+                                  message: "could not load embedder '\(body.model)': \(error)")
+            }
+            let payload = ["status": "loaded", "model": body.model, "kind": "embedder"]
+            let data = try JSONEncoder().encode(payload)
+            return jsonResponse(.ok, data: data)
+        } else {
+            do {
+                _ = try await registry.load(body.model)
+            } catch ModelRegistry.LoadError.insufficientMemory(let needed, let available, let ceiling, let currentlyLoaded) {
+                return insufficientMemoryError(
+                    neededBytes: needed,
+                    availableBytes: available,
+                    ceilingBytes: ceiling,
+                    currentlyLoaded: currentlyLoaded
+                )
+            } catch ModelRegistry.LoadError.loadFailed(let why) {
+                return jsonError(.serviceUnavailable, code: "model_load_failed",
+                                  message: "could not load model '\(body.model)': \(why)")
+            } catch {
+                return jsonError(.serviceUnavailable, code: "model_load_failed",
+                                  message: "could not load model '\(body.model)': \(error)")
+            }
         }
         // Optional draft pairing for MTP speculative decoding (V2).
         if let draftId = body.draft_model, !draftId.isEmpty {

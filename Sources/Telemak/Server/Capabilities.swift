@@ -8,8 +8,8 @@ struct CapabilitiesHandler: Sendable {
     let registry: ModelRegistry
 
     /// Telemak engine semantic version — bump on contract changes.
-    /// 0.3.0 = +speculative_decoding capability (V2 MTP support).
-    static let engineVersion = "0.3.0"
+    /// 0.4.0 = +embeddings capability and /v1/embeddings route.
+    static let engineVersion = "0.4.0"
 
     func add(to router: Router<BasicRequestContext>) {
         router.get("/.well-known/inference-engine.json") { _, _ async throws -> Response in
@@ -19,6 +19,7 @@ struct CapabilitiesHandler: Sendable {
 
     private func handle() async throws -> Response {
         let loaded = await registry.loadedModels
+        let embedders = await registry.loadedEmbedders
 
         struct ModelInfo: Encodable {
             let id: String
@@ -33,10 +34,12 @@ struct CapabilitiesHandler: Sendable {
         struct ModelExt: Encodable {
             let sizeGB: Double
             let loadedAt: String
+            let kind: String
 
             enum CodingKeys: String, CodingKey {
                 case sizeGB = "size_gb"
                 case loadedAt = "loaded_at"
+                case kind
             }
         }
 
@@ -65,6 +68,7 @@ struct CapabilitiesHandler: Sendable {
             let sessionCache: Bool
             let openaiCompat: String
             let anthropicCompat: String
+            let embeddings: Bool
             let speculativeDecoding: SpeculativeCapability
 
             enum CodingKeys: String, CodingKey {
@@ -75,6 +79,7 @@ struct CapabilitiesHandler: Sendable {
                 case sessionCache = "session_cache"
                 case openaiCompat = "openai_compat"
                 case anthropicCompat = "anthropic_compat"
+                case embeddings
                 case speculativeDecoding = "speculative_decoding"
             }
         }
@@ -94,10 +99,22 @@ struct CapabilitiesHandler: Sendable {
                 id: entry.id,
                 xTelemak: ModelExt(
                     sizeGB: Double(entry.ramEstimateBytes) / 1_073_741_824.0,
-                    loadedAt: iso.string(from: entry.loadedAt)
+                    loadedAt: iso.string(from: entry.loadedAt),
+                    kind: "llm"
                 )
             )
         }
+        let embedderEntries: [ModelInfo] = embedders.map { entry in
+            ModelInfo(
+                id: entry.id,
+                xTelemak: ModelExt(
+                    sizeGB: Double(entry.ramEstimateBytes) / 1_073_741_824.0,
+                    loadedAt: iso.string(from: entry.loadedAt),
+                    kind: "embedder"
+                )
+            )
+        }
+        let allModelEntries = (modelEntries + embedderEntries).sorted { $0.id < $1.id }
 
         // V1 surface — tools is `true` because Block 4 wires tool-call
         // routing through; Anthropic compat lands in Block 4 too. Both
@@ -121,6 +138,7 @@ struct CapabilitiesHandler: Sendable {
             sessionCache: true,
             openaiCompat: "v1",
             anthropicCompat: "v1",
+            embeddings: !embedders.isEmpty,
             speculativeDecoding: speculative
         )
 
@@ -128,7 +146,7 @@ struct CapabilitiesHandler: Sendable {
             engine: "telemak",
             version: Self.engineVersion,
             capabilities: capabilities,
-            models: modelEntries
+            models: allModelEntries
         )
 
         let data = try JSONEncoder().encode(payload)
