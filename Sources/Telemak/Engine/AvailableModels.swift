@@ -12,13 +12,17 @@ public enum AvailableModels {
     public struct Entry: Codable, Sendable, Equatable {
         public let id: String
         public let source: String       // "telemak-models-dir" | "hf-cache"
+        public let sizeBytes: Int64
         public let sizeGB: Double
+        public let family: String?      // e.g. "qwen3_moe", "qwen2", "gemma2"; nil if config.json missing
         public let lastModified: String  // ISO 8601
 
         enum CodingKeys: String, CodingKey {
             case id
             case source
+            case sizeBytes = "size_bytes"
             case sizeGB = "size_gb"
+            case family
             case lastModified = "last_modified"
         }
     }
@@ -80,7 +84,9 @@ public enum AvailableModels {
                 results.append(Entry(
                     id: id,
                     source: "telemak-models-dir",
+                    sizeBytes: size,
                     sizeGB: Double(size) / 1_073_741_824.0,
+                    family: familyFor(id: id, snapshotDir: snapshotDir),
                     lastModified: iso8601(mtime)
                 ))
             }
@@ -116,7 +122,9 @@ public enum AvailableModels {
             results.append(Entry(
                 id: id,
                 source: "hf-cache",
+                sizeBytes: size,
                 sizeGB: Double(size) / 1_073_741_824.0,
+                family: familyFor(id: id, snapshotDir: snapshotDir),
                 lastModified: iso8601(mtime)
             ))
         }
@@ -124,6 +132,27 @@ public enum AvailableModels {
     }
 
     // MARK: - utilities
+
+    /// Sniff `config.json` for HF `model_type` (canonical family id used by
+    /// transformers + mlx-swift-lm). Falls back to a path heuristic when the
+    /// file is missing or unreadable — handles bare GGUFs and odd repos that
+    /// ship without a config.
+    private static func familyFor(id: String, snapshotDir: String) -> String? {
+        let configPath = (snapshotDir as NSString).appendingPathComponent("config.json")
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+           let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+           let modelType = json["model_type"] as? String,
+           !modelType.isEmpty {
+            return modelType
+        }
+        // Path heuristic: lowercased "name" segment, strip size/quant suffixes.
+        let name = id.split(separator: "/").last.map(String.init) ?? id
+        let lower = name.lowercased()
+        for family in ["qwen3", "qwen2", "qwen", "llama", "gemma", "mistral", "phi", "deepseek"] {
+            if lower.contains(family) { return family }
+        }
+        return nil
+    }
 
     private static func fileExists(_ path: String) -> Bool {
         var isDir: ObjCBool = false
