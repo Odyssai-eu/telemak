@@ -24,6 +24,7 @@ public struct Qwen35TextFields: Decodable, Sendable {
     public let numExperts: Int
     public let numExpertsPerTok: Int
     public let normTopkProb: Bool
+    public let intermediateSize: Int
     public let moeIntermediateSize: Int
     public let sharedExpertIntermediateSize: Int
     public let tieWordEmbeddings: Bool
@@ -47,6 +48,7 @@ public struct Qwen35TextFields: Decodable, Sendable {
         case numExperts = "num_experts"
         case numExpertsPerTok = "num_experts_per_tok"
         case normTopkProb = "norm_topk_prob"
+        case intermediateSize = "intermediate_size"
         case moeIntermediateSize = "moe_intermediate_size"
         case sharedExpertIntermediateSize = "shared_expert_intermediate_size"
         case tieWordEmbeddings = "tie_word_embeddings"
@@ -91,6 +93,7 @@ public struct Qwen35TextFields: Decodable, Sendable {
         self.numExperts = try c.decodeIfPresent(Int.self, forKey: .numExperts) ?? 0
         self.numExpertsPerTok = try c.decodeIfPresent(Int.self, forKey: .numExpertsPerTok) ?? 0
         self.normTopkProb = try c.decodeIfPresent(Bool.self, forKey: .normTopkProb) ?? true
+        self.intermediateSize = try c.decodeIfPresent(Int.self, forKey: .intermediateSize) ?? 14336
         self.moeIntermediateSize = try c.decodeIfPresent(Int.self, forKey: .moeIntermediateSize) ?? 0
         self.sharedExpertIntermediateSize =
             try c.decodeIfPresent(Int.self, forKey: .sharedExpertIntermediateSize) ?? 0

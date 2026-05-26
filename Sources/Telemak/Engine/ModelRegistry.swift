@@ -166,6 +166,22 @@ public actor ModelRegistry {
         if neededBytes > 0 {
             await wiredMemory?.reserveModel(id, weightBytes: Int(neededBytes))
         }
+        if MTPModelLoader.hasEmbeddedHead(identifier: id) {
+            let draftId = MTPModelLoader.embeddedDraftId(for: id)
+            do {
+                let model = try MTPModelLoader.load(identifier: id)
+                draftEntries[draftId] = LoadedDraft(
+                    id: draftId, mainId: id, model: model,
+                    loadedAt: Date(), ramEstimateBytes: 0
+                )
+                pairing[id] = draftId
+                Self.dbg("embedded MTP draft paired main=\(id) draft=\(draftId)")
+            } catch {
+                entries.removeValue(forKey: id)
+                await wiredMemory?.endReservation(id)
+                throw LoadError.loadFailed(underlying: "embedded MTP head failed to load: \(error)")
+            }
+        }
         await persistState()
         Self.dbg("persistState done id=\(id) total_wall=\(Date().timeIntervalSince(estimateStart))s")
         return container

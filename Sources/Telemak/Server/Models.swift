@@ -52,6 +52,12 @@ struct ModelsHandler: Sendable {
         }
         struct ModelExt: Encodable {
             let kind: String
+            let mtpEnabled: Bool
+
+            enum CodingKeys: String, CodingKey {
+                case kind
+                case mtpEnabled = "mtp_enabled"
+            }
         }
         struct ModelList: Encodable {
             let object: String
@@ -60,13 +66,17 @@ struct ModelsHandler: Sendable {
 
         let loaded = await registry.loadedModels
         let embedders = await registry.loadedEmbedders
+        let mtpEnabledModels = Set(await registry.activePairs.map(\.main))
         let llmEntries = loaded.map {
             ModelEntry(
                 id: $0.id,
                 object: "model",
                 created: Int($0.loadedAt.timeIntervalSince1970),
                 owned_by: "telemak",
-                xTelemak: .init(kind: "llm")
+                xTelemak: .init(
+                    kind: $0.isVision ? "vlm" : "llm",
+                    mtpEnabled: mtpEnabledModels.contains($0.id)
+                )
             )
         }
         let embedderEntries = embedders.map {
@@ -75,7 +85,7 @@ struct ModelsHandler: Sendable {
                 object: "model",
                 created: Int($0.loadedAt.timeIntervalSince1970),
                 owned_by: "telemak",
-                xTelemak: .init(kind: "embedder")
+                xTelemak: .init(kind: "embedder", mtpEnabled: false)
             )
         }
         let entries = (llmEntries + embedderEntries).sorted { $0.id < $1.id }
@@ -202,6 +212,8 @@ struct ModelsHandler: Sendable {
         }
         var payload: [String: String] = ["status": "loaded", "model": body.model]
         if let draftId = body.draft_model, !draftId.isEmpty {
+            payload["draft_model"] = draftId
+        } else if let draftId = await registry.draftId(for: body.model) {
             payload["draft_model"] = draftId
         }
         let data = try JSONEncoder().encode(payload)

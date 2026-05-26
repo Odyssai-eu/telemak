@@ -8,8 +8,8 @@ struct CapabilitiesHandler: Sendable {
     let registry: ModelRegistry
 
     /// Telemak engine semantic version — bump on contract changes.
-    /// 0.5.0 = +vision image input on chat/messages.
-    static let engineVersion = "0.5.0"
+    /// 0.6.0 = per-model `mtp_enabled` capability.
+    static let engineVersion = "0.6.0"
 
     func add(to router: Router<BasicRequestContext>) {
         router.get("/.well-known/inference-engine.json") { _, _ async throws -> Response in
@@ -35,11 +35,13 @@ struct CapabilitiesHandler: Sendable {
             let sizeGB: Double
             let loadedAt: String
             let kind: String
+            let mtpEnabled: Bool
 
             enum CodingKeys: String, CodingKey {
                 case sizeGB = "size_gb"
                 case loadedAt = "loaded_at"
                 case kind
+                case mtpEnabled = "mtp_enabled"
             }
         }
 
@@ -93,6 +95,8 @@ struct CapabilitiesHandler: Sendable {
 
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime]
+        let pairs = await registry.activePairs
+        let mtpEnabledModels = Set(pairs.map(\.main))
 
         let modelEntries: [ModelInfo] = loaded.map { entry in
             ModelInfo(
@@ -100,7 +104,8 @@ struct CapabilitiesHandler: Sendable {
                 xTelemak: ModelExt(
                     sizeGB: Double(entry.ramEstimateBytes) / 1_073_741_824.0,
                     loadedAt: iso.string(from: entry.loadedAt),
-                    kind: entry.isVision ? "vlm" : "llm"
+                    kind: entry.isVision ? "vlm" : "llm",
+                    mtpEnabled: mtpEnabledModels.contains(entry.id)
                 )
             )
         }
@@ -110,7 +115,8 @@ struct CapabilitiesHandler: Sendable {
                 xTelemak: ModelExt(
                     sizeGB: Double(entry.ramEstimateBytes) / 1_073_741_824.0,
                     loadedAt: iso.string(from: entry.loadedAt),
-                    kind: "embedder"
+                    kind: "embedder",
+                    mtpEnabled: false
                 )
             )
         }
@@ -124,11 +130,11 @@ struct CapabilitiesHandler: Sendable {
         // to `true` once Unit 2 lands, but the API surface
         // (`/admin/load` `draft_model`) accepts pairs today so the wire
         // contract stays stable.
-        let pairs = await registry.activePairs.map { SpeculativePair(main: $0.main, draft: $0.draft) }
+        let speculativePairs = pairs.map { SpeculativePair(main: $0.main, draft: $0.draft) }
         let speculative = SpeculativeCapability(
-            supported: !pairs.isEmpty,
+            supported: !speculativePairs.isEmpty,
             modes: ["mtp_adapter"],
-            activePairs: pairs
+            activePairs: speculativePairs
         )
         let capabilities = Capabilities(
             stream: true,

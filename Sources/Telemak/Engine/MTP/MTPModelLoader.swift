@@ -41,7 +41,7 @@ public enum MTPModelLoader {
                 return "config.json decode failed in \(dir): \(why)"
             case .wrongModelType(let dir, let got):
                 return
-                    "expected model_type 'qwen3_5_mtp' in \(dir)/config.json, got '\(got)'"
+                    "expected model_type 'qwen3_5_mtp' or embedded Qwen3.5 MTP weights in \(dir)/config.json, got '\(got)'"
             case .noSafetensors(let dir):
                 return "no *.safetensors files found in \(dir)"
             case .weightLoadFailed(let why):
@@ -67,7 +67,7 @@ public enum MTPModelLoader {
         } catch {
             throw LoadError.configDecodeFailed(dir: staged.path, underlying: "\(error)")
         }
-        guard mtpConfig.modelType == "qwen3_5_mtp" else {
+        if mtpConfig.modelType != "qwen3_5_mtp", !hasEmbeddedHead(in: dir) {
             throw LoadError.wrongModelType(dir: staged.path, gotType: mtpConfig.modelType)
         }
         // BaseConfiguration handles the quantization shape +
@@ -95,6 +95,28 @@ public enum MTPModelLoader {
             throw LoadError.weightLoadFailed(underlying: "\(error)")
         }
         return model
+    }
+
+    public static func embeddedDraftId(for mainId: String) -> String {
+        "\(mainId)#embedded-mtp"
+    }
+
+    public static func hasEmbeddedHead(identifier: String) -> Bool {
+        guard let dir = try? resolveDir(identifier) else { return false }
+        return hasEmbeddedHead(in: dir)
+    }
+
+    private static func hasEmbeddedHead(in dir: URL) -> Bool {
+        let indexURL = dir.appendingPathComponent("model.safetensors.index.json")
+        guard let data = try? Data(contentsOf: indexURL),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let weightMap = root["weight_map"] as? [String: Any]
+        else {
+            return false
+        }
+        return weightMap.keys.contains {
+            $0.hasPrefix("language_model.mtp.") || $0.hasPrefix("mtp.")
+        }
     }
 
     private static func resolveDir(_ identifier: String) throws -> URL {
