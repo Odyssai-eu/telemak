@@ -8,9 +8,8 @@ import TelemakMTP
 struct CapabilitiesHandler: Sendable {
     let registry: ModelRegistry
 
-    /// Telemak engine semantic version — bump on contract changes.
-    /// 0.5.0 = +vision image input on chat/messages.
-    static let engineVersion = "0.5.0"
+    /// Telemak engine semantic version.
+    static let engineVersion = telemakVersion
 
     func add(to router: Router<BasicRequestContext>) {
         router.get("/.well-known/inference-engine.json") { _, _ async throws -> Response in
