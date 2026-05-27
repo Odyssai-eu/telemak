@@ -1,6 +1,6 @@
 import ArgumentParser
 
-let telemakVersion = "0.6.1"
+let telemakVersion = "0.6.2"
 
 @main
 struct Telemak: AsyncParsableCommand {
