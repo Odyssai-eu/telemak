@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import Foundation
 import SwiftUI
+import TelemakVersion
 
 @main
 struct TelemakMenuBarApp: App {
@@ -41,6 +42,7 @@ struct TelemakMenuBarApp: App {
 @MainActor
 final class HealthPoller: ObservableObject {
     @Published var status: String = "checking…"
+    @Published var runtimeVersion: String?
     @Published var modelsLoaded: [String] = []
     @Published var avgTokPerSec: Double?
     @Published var requestsServed: Int = 0
@@ -95,6 +97,7 @@ final class HealthPoller: ObservableObject {
             let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
             isUp = true
             status = "Running"
+            runtimeVersion = json["version"] as? String
             modelsLoaded = json["models_loaded"] as? [String] ?? []
             avgTokPerSec = json["avg_tok_s_recent"] as? Double
             requestsServed = json["requests_served"] as? Int ?? 0
@@ -105,6 +108,7 @@ final class HealthPoller: ObservableObject {
         } catch {
             isUp = false
             status = "Unreachable"
+            runtimeVersion = nil
             modelsLoaded = []
         }
     }
@@ -187,8 +191,12 @@ struct MenuBarPopover: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Telemak — \(poller.status)")
                     .font(.headline)
-                Text(settings.endpoint)
+                Text(versionLine)
                     .font(.caption)
+                    .foregroundColor(.secondary)
+                    .textSelection(.enabled)
+                Text(settings.endpoint)
+                    .font(.caption2)
                     .foregroundColor(.secondary)
                     .textSelection(.enabled)
             }
@@ -202,6 +210,13 @@ struct MenuBarPopover: View {
                     .background(Capsule().fill(.quaternary))
             }
         }
+    }
+
+    private var versionLine: String {
+        if let runtimeVersion = poller.runtimeVersion {
+            return "Menubar v\(telemakVersion) · Runtime v\(runtimeVersion)"
+        }
+        return "Menubar v\(telemakVersion)"
     }
 
     private var modelsSection: some View {

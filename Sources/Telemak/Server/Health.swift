@@ -1,6 +1,7 @@
 import Foundation
 import Hummingbird
 import MLX
+import TelemakVersion
 
 /// `GET /health` — enriched in Phase 5: uptime, loaded models, MLX memory,
 /// request count, recent throughput.
@@ -29,6 +30,7 @@ struct HealthHandler: Sendable {
         // accounting can land alongside Block 5's metrics endpoint.
         let payload = HealthPayload(
             status: "ok",
+            version: telemakVersion,
             uptimeS: uptime,
             modelsLoaded: loadedModelIds,
             wiredMemoryUsedGB: usedGB,
@@ -66,6 +68,7 @@ struct HealthHandler: Sendable {
 
 private struct HealthPayload: Codable {
     let status: String
+    let version: String
     let uptimeS: Double
     let modelsLoaded: [String]
     let wiredMemoryUsedGB: Double
@@ -75,6 +78,7 @@ private struct HealthPayload: Codable {
 
     enum CodingKeys: String, CodingKey {
         case status
+        case version
         case uptimeS = "uptime_s"
         case modelsLoaded = "models_loaded"
         case wiredMemoryUsedGB = "wired_memory_used_gb"

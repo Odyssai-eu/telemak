@@ -6,7 +6,7 @@ set -eu
 CONFIGURATION="${1:-Release}"
 ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
 DIST="$ROOT/dist"
-VERSION="$(sed -n 's/^let telemakVersion = "\(.*\)"/\1/p' "$ROOT/Sources/Telemak/Telemak.swift")"
+VERSION="$(sed -n 's/^public let telemakVersion = "\(.*\)"/\1/p' "$ROOT/Sources/TelemakVersion/Version.swift")"
 if [ -z "$VERSION" ]; then
   VERSION="0.0.0"
 fi

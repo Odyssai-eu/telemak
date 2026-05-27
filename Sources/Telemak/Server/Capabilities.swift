@@ -1,5 +1,6 @@
 import Foundation
 import Hummingbird
+import TelemakVersion
 import TelemakMTP
 
 /// `GET /.well-known/inference-engine.json` — capability contract that

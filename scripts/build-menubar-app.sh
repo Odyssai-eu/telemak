@@ -40,7 +40,7 @@ cp "$BINARY" "$APP/Contents/Resources/telemak-menubar"
 cp -R "$MLX_BUNDLE" "$APP/Contents/Resources/mlx-swift_Cmlx.bundle"
 chmod 755 "$APP/Contents/MacOS/Telemak" "$APP/Contents/Resources/telemak" "$APP/Contents/Resources/telemak-menubar"
 
-VERSION="$(sed -n 's/^let telemakVersion = "\(.*\)"/\1/p' "$ROOT/Sources/Telemak/Telemak.swift")"
+VERSION="$(sed -n 's/^public let telemakVersion = "\(.*\)"/\1/p' "$ROOT/Sources/TelemakVersion/Version.swift")"
 if [ -z "$VERSION" ]; then
   VERSION="0.0.0"
 fi
