@@ -1,5 +1,6 @@
 import Foundation
 import Hummingbird
+import MLX
 import MLXLLM
 import MLXLMCommon
 import TelemakMTP
@@ -357,6 +358,7 @@ struct ModelsHandler: Sendable {
             let temperature: Float?
             let top_p: Float?
             let top_k: Int?
+            let draft_block_size: Int?
         }
         let buf = try await request.body.collect(upTo: 1 << 16)
         let body: SmokeBody
@@ -378,11 +380,8 @@ struct ModelsHandler: Sendable {
             return jsonError(.badRequest, code: "no_draft_paired",
                               message: "no MTP draft paired with main model '\(mainId)'")
         }
-        guard case .qwen35(let draftModel) = draftEntry.model else {
-            return jsonError(.badRequest, code: "gemma4_mtp_smoke_not_wired",
-                              message: "Gemma4Assistant sidecar is loaded, but the Gemma4 speculative iterator is not wired yet")
-        }
         let maxTok = body.max_tokens ?? 128
+        let blockSize = body.draft_block_size
         let promptText = body.prompt
         var generationParameters = GenerateParameters(maxTokens: maxTok, temperature: body.temperature ?? 0)
         if let topP = body.top_p { generationParameters.topP = topP }
@@ -390,28 +389,69 @@ struct ModelsHandler: Sendable {
         let parameters = generationParameters
 
         return try await main.container.perform { ctx in
-            // Tokenize the prompt with the main model's tokenizer.
-            let promptTokens = ctx.tokenizer.encode(text: promptText)
+            // Prepare through the model processor so smoke uses the same chat
+            // template path as /v1/chat/completions.
+            let input = try await ctx.processor.prepare(input: UserInput(prompt: promptText))
+            let tokenArray = input.text.tokens.reshaped(-1).asType(.int32)
+            eval(tokenArray)
+            let promptTokens = tokenArray.asArray(Int32.self).map(Int.init)
             guard !promptTokens.isEmpty else {
                 throw HTTPError(.badRequest, message: "empty prompt after tokenization")
             }
-            // Cast the main model to our Qwen3.5/3.6 LLM protocol with
-            // fork-added forwardWithHidden / targetVerify / rollback APIs.
-            guard let qwen = ctx.model as? any Qwen35HiddenStateProvider else {
-                throw HTTPError(.badRequest,
-                                message: "main model is not Qwen3.5/3.6 (\(type(of: ctx.model))); MTP unsupported")
-            }
             let start = Date()
-            let iterator = MTPSpeculativeIterator(
-                main: qwen,
-                draft: draftModel,
-                promptTokens: promptTokens,
-                maxTokens: maxTok,
-                parameters: parameters
-            )
             var generated: [Int] = []
-            while let tok = iterator.next() {
-                generated.append(tok)
+            let rounds: Int
+            let proposed: Int
+            let accepted: Int
+            let acceptanceRate: Double
+            let effectiveBlockSize: Int
+
+            switch draftEntry.model {
+            case .qwen35(let draftModel):
+                // Cast the main model to our Qwen3.5/3.6 LLM protocol with
+                // fork-added forwardWithHidden / targetVerify / rollback APIs.
+                guard let qwen = ctx.model as? any Qwen35HiddenStateProvider else {
+                    throw HTTPError(.badRequest,
+                                    message: "main model is not Qwen3.5/3.6 (\(type(of: ctx.model))); MTP unsupported")
+                }
+                let iterator = MTPSpeculativeIterator(
+                    main: qwen,
+                    draft: draftModel,
+                    promptTokens: promptTokens,
+                    maxTokens: maxTok,
+                    blockSize: blockSize,
+                    parameters: parameters
+                )
+                while let tok = iterator.next() {
+                    generated.append(tok)
+                }
+                rounds = iterator.roundsRun
+                proposed = iterator.totalProposed
+                accepted = iterator.totalAccepted
+                acceptanceRate = iterator.acceptanceRate
+                effectiveBlockSize = iterator.blockSize
+
+            case .gemma4Assistant(let draftModel):
+                guard let gemma = ctx.model as? Gemma4Model else {
+                    throw HTTPError(.badRequest,
+                                    message: "main model is not Gemma4 (\(type(of: ctx.model))); Gemma4Assistant MTP unsupported")
+                }
+                let iterator = Gemma4AssistantSpeculativeIterator(
+                    main: gemma,
+                    draft: draftModel,
+                    promptTokens: promptTokens,
+                    maxTokens: maxTok,
+                    blockSize: blockSize ?? 6,
+                    parameters: parameters
+                )
+                while let tok = try iterator.next() {
+                    generated.append(tok)
+                }
+                rounds = iterator.roundsRun
+                proposed = iterator.totalProposed
+                accepted = iterator.totalAccepted
+                acceptanceRate = iterator.acceptanceRate
+                effectiveBlockSize = iterator.blockSize
             }
 
             let elapsed = Date().timeIntervalSince(start)
@@ -420,13 +460,13 @@ struct ModelsHandler: Sendable {
             let payload: [String: Any] = [
                 "text": text,
                 "tokens": generated.count,
-                "rounds": iterator.roundsRun,
-                "proposed": iterator.totalProposed,
-                "accepted": iterator.totalAccepted,
-                "acceptance_rate": iterator.acceptanceRate,
+                "rounds": rounds,
+                "proposed": proposed,
+                "accepted": accepted,
+                "acceptance_rate": acceptanceRate,
                 "elapsed_s": elapsed,
                 "tokens_per_sec": tps,
-                "block_size": iterator.blockSize,
+                "block_size": effectiveBlockSize,
             ]
             let data = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data("{}".utf8)
             return Response(
