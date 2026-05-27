@@ -15,6 +15,31 @@
 The build host is whichever machine runs `./scripts/build.sh Release` —
 historically Sophie's workstation, but max-64 itself works too.
 
+If the identity already exists on `max-64`, restore it on a new build host
+instead of minting a fresh certificate. That preserves the same signing
+authority across machines.
+
+```bash
+mkdir -p ~/.telemak-codesign
+scp admin@max-64.lan:/Users/admin/.telemak-codesign/telemak.{p12,cert} ~/.telemak-codesign/
+chmod 600 ~/.telemak-codesign/telemak.{p12,cert}
+
+security import ~/.telemak-codesign/telemak.p12 -P telemak \
+  -T /usr/bin/codesign -T /usr/bin/security \
+  -k ~/Library/Keychains/login.keychain-db
+
+security add-trusted-cert -r trustRoot -p codeSign \
+  -k ~/Library/Keychains/login.keychain-db ~/.telemak-codesign/telemak.cert
+
+security find-identity -v -p codesigning
+```
+
+Expected result:
+
+```text
+1 valid identities found
+```
+
 ### 1. Generate self-signed certificate
 
 ```bash
