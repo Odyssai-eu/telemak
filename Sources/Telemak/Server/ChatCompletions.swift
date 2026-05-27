@@ -92,6 +92,39 @@ struct ChatCompletionsHandler: Sendable {
         let promptForGeneration: String = (cacheHit != nil) ? lastUserMessageOnly(payload.messages) : userPrompt
         let effectiveInstructions: String? = (cacheHit != nil) ? nil : instructions
 
+        // MTP fast path. If this main model has a paired speculative draft
+        // and the request doesn't need tool calls or vision (the draft
+        // can't propose either), route through the MTP iterator. Falls
+        // through to the regular ChatSession path on any unsupported
+        // feature so no caller is regressed by enabling a draft.
+        //
+        // The session prompt-cache (cacheHit) is also incompatible with
+        // the iterator's `targetVerify`/`rollback` semantics today, so
+        // we treat a cache hit as a fall-through. Sessions that span
+        // multiple turns will get baseline perf on follow-up turns; the
+        // first turn (no cache hit) benefits from MTP. That's a known
+        // limitation tracked separately.
+        if cacheHit == nil,
+           let draftEntry = await mtpDraftIfEligible(
+               for: modelId,
+               toolSpecs: toolSpecs,
+               imageBatch: imageBatch
+           )
+        {
+            return try await runMTPChat(
+                container: container,
+                draftEntry: draftEntry,
+                modelId: modelId,
+                userPrompt: promptForGeneration,
+                instructions: effectiveInstructions,
+                params: params,
+                stopSequences: stopSequences,
+                stream: payload.stream == true,
+                seed: payload.seed,
+                cachedTokens: 0
+            )
+        }
+
         if payload.stream == true {
             return streamingResponse(
                 container: container,
