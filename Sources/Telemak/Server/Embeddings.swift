@@ -26,11 +26,12 @@ struct EmbeddingsHandler: Sendable {
         }
 
         let format = body.encodingFormat ?? .float
-        guard let loaded = await registry.getEmbedder(body.model) else {
+        let modelId = ModelLoader.canonicalIdentifier(body.model)
+        guard let loaded = await registry.getEmbedder(modelId) else {
             return jsonError(
                 .notFound,
                 code: "model_not_loaded",
-                message: "embedder model '\(body.model)' is not loaded"
+                message: "embedder model '\(modelId)' is not loaded"
             )
         }
 
@@ -47,7 +48,7 @@ struct EmbeddingsHandler: Sendable {
             let payload = EmbeddingsResponse(
                 object: "list",
                 data: data,
-                model: body.model,
+                model: modelId,
                 usage: .init(promptTokens: tokenCount, totalTokens: tokenCount)
             )
             let encoded = try JSONEncoder().encode(payload)

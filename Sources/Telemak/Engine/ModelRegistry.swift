@@ -142,6 +142,7 @@ public actor ModelRegistry {
     /// `unload` first.
     @discardableResult
     public func load(_ id: String, forceLLM: Bool = false) async throws -> ModelContainer {
+        let id = ModelLoader.canonicalIdentifier(id)
         Self.dbg("entry id=\(id) forceLLM=\(forceLLM)")
         if let existing = entries[id] {
             if forceLLM && existing.isVision {
@@ -199,6 +200,7 @@ public actor ModelRegistry {
 
     @discardableResult
     public func loadEmbedder(_ id: String) async throws -> EmbedderModelContainer {
+        let id = ModelLoader.canonicalIdentifier(id)
         if let existing = embedderEntries[id] {
             return existing.container
         }
@@ -247,6 +249,8 @@ public actor ModelRegistry {
         pairedWith mainId: String,
         allowUnverified: Bool = false
     ) async throws -> MTPModelLoader.LoadedDraftModel {
+        let draftId = ModelLoader.canonicalIdentifier(draftId)
+        let mainId = ModelLoader.canonicalIdentifier(mainId)
         if let existing = draftEntries[draftId] {
             // Reuse if already loaded. Update the pairing in case the
             // same draft got attached to a different main (rare).
@@ -333,6 +337,7 @@ public actor ModelRegistry {
     /// clears the pairing back-reference).
     @discardableResult
     public func unload(_ id: String) async -> Bool {
+        let id = ModelLoader.canonicalIdentifier(id)
         if entries.removeValue(forKey: id) != nil {
             await wiredMemory?.endReservation(id)
             await sessionStore?.invalidateModel(id)

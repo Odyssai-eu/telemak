@@ -31,6 +31,43 @@ private let _mlxvlmTrampolineLoad: VLMModelFactory.Type = VLMModelFactory.self
 /// standard HF cache `models--<org>--<name>/snapshots/...`. We don't try to
 /// reuse HubClient for it; we go straight to local-directory loading.
 public enum ModelLoader {
+    /// Convert an absolute model path under `TELEMAK_MODELS_DIR` back to
+    /// its stable repository id (`org/name`). The registry, staged config
+    /// directory, session cache and wired-memory reservations are keyed by
+    /// model id; accepting both `/Volumes/.../org/name` and `org/name` for
+    /// the same files creates duplicate identities for one model.
+    public static func canonicalIdentifier(_ identifier: String) -> String {
+        let trimmed = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("/"),
+              let modelsDir = ProcessInfo.processInfo.environment["TELEMAK_MODELS_DIR"]
+        else {
+            return trimmed
+        }
+
+        let modelPath = URL(fileURLWithPath: trimmed).standardized.path
+        let rootPath = URL(fileURLWithPath: modelsDir).standardized.path
+        guard modelPath == rootPath || modelPath.hasPrefix(rootPath + "/") else {
+            return trimmed
+        }
+
+        let relative = String(modelPath.dropFirst(rootPath.count))
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let parts = relative.split(separator: "/").map(String.init)
+        guard parts.count >= 2 else { return trimmed }
+
+        let candidate = "\(parts[0])/\(parts[1])"
+        guard let resolved = resolveModelsDir(modelsDir, id: candidate) else {
+            return trimmed
+        }
+
+        let candidateRoot = URL(fileURLWithPath: (modelsDir as NSString).appendingPathComponent(candidate))
+            .standardized.path
+        let resolvedPath = resolved.standardized.path
+        if modelPath == candidateRoot || modelPath == resolvedPath || modelPath.hasPrefix(candidateRoot + "/") {
+            return candidate
+        }
+        return trimmed
+    }
 
     public static func load(
         identifier: String,

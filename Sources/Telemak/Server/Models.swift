@@ -152,14 +152,16 @@ struct ModelsHandler: Sendable {
             return jsonError(.badRequest, code: "invalid_request_error",
                               message: "expected {\"model\": \"<id>\", \"draft_model\": \"<id?>\"}: \(error)")
         }
-        let isEmbedder = EmbedderLoader.isEmbedder(identifier: body.model)
+        let modelId = ModelLoader.canonicalIdentifier(body.model)
+        let draftId = body.draft_model.map(ModelLoader.canonicalIdentifier)
+        let isEmbedder = EmbedderLoader.isEmbedder(identifier: modelId)
         if isEmbedder {
-            if let draftId = body.draft_model, !draftId.isEmpty {
+            if let draftId, !draftId.isEmpty {
                 return jsonError(.badRequest, code: "invalid_request_error",
                                   message: "draft_model is only valid for chat models")
             }
             do {
-                _ = try await registry.loadEmbedder(body.model)
+                _ = try await registry.loadEmbedder(modelId)
             } catch ModelRegistry.LoadError.insufficientMemory(let needed, let available, let ceiling, let currentlyLoaded) {
                 return insufficientMemoryError(
                     neededBytes: needed,
@@ -169,21 +171,21 @@ struct ModelsHandler: Sendable {
                 )
             } catch ModelRegistry.LoadError.loadFailed(let why) {
                 return jsonError(.serviceUnavailable, code: "model_load_failed",
-                                  message: "could not load embedder '\(body.model)': \(why)")
+                                  message: "could not load embedder '\(modelId)': \(why)")
             } catch {
                 return jsonError(.serviceUnavailable, code: "model_load_failed",
-                                  message: "could not load embedder '\(body.model)': \(error)")
+                                  message: "could not load embedder '\(modelId)': \(error)")
             }
-            let payload = ["status": "loaded", "model": body.model, "kind": "embedder"]
+            let payload = ["status": "loaded", "model": modelId, "kind": "embedder"]
             let data = try JSONEncoder().encode(payload)
             return jsonResponse(.ok, data: data)
         } else {
             do {
-                let forceLLM = body.force_llm ?? body.draft_model.map {
+                let forceLLM = body.force_llm ?? draftId.map {
                     let draftType = ModelLoader.modelType(identifier: $0)
                     return draftType == "gemma4_assistant" || draftType == "qwen3_5_mtp"
                 } ?? false
-                _ = try await registry.load(body.model, forceLLM: forceLLM)
+                _ = try await registry.load(modelId, forceLLM: forceLLM)
             } catch ModelRegistry.LoadError.insufficientMemory(let needed, let available, let ceiling, let currentlyLoaded) {
                 return insufficientMemoryError(
                     neededBytes: needed,
@@ -193,18 +195,18 @@ struct ModelsHandler: Sendable {
                 )
             } catch ModelRegistry.LoadError.loadFailed(let why) {
                 return jsonError(.serviceUnavailable, code: "model_load_failed",
-                                  message: "could not load model '\(body.model)': \(why)")
+                                  message: "could not load model '\(modelId)': \(why)")
             } catch {
                 return jsonError(.serviceUnavailable, code: "model_load_failed",
-                                  message: "could not load model '\(body.model)': \(error)")
+                                  message: "could not load model '\(modelId)': \(error)")
             }
         }
         // Optional draft pairing for MTP speculative decoding (V2).
-        if let draftId = body.draft_model, !draftId.isEmpty {
+        if let draftId, !draftId.isEmpty {
             do {
                 _ = try await registry.loadDraft(
                     draftId,
-                    pairedWith: body.model,
+                    pairedWith: modelId,
                     allowUnverified: body.allow_unverified_mtp ?? false
                 )
             } catch ModelRegistry.LoadError.insufficientMemory(let needed, let available, let ceiling, let currentlyLoaded) {
@@ -222,8 +224,8 @@ struct ModelsHandler: Sendable {
                                   message: "main loaded but draft '\(draftId)' failed: \(error)")
             }
         }
-        var payload: [String: String] = ["status": "loaded", "model": body.model]
-        if let draftId = body.draft_model, !draftId.isEmpty {
+        var payload: [String: String] = ["status": "loaded", "model": modelId]
+        if let draftId, !draftId.isEmpty {
             payload["draft_model"] = draftId
         }
         let data = try JSONEncoder().encode(payload)
@@ -246,10 +248,11 @@ struct ModelsHandler: Sendable {
             return jsonResponse(.ok, data: data)
         }
 
-        guard let modelId = body?.model, !modelId.isEmpty else {
+        guard let rawModelId = body?.model, !rawModelId.isEmpty else {
             return jsonError(.badRequest, code: "invalid_request_error",
                               message: "specify model id or pass ?all=true")
         }
+        let modelId = ModelLoader.canonicalIdentifier(rawModelId)
 
         let wasLoaded = await registry.unload(modelId)
         let payload: [String: Any] = [

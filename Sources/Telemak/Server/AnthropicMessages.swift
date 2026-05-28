@@ -29,9 +29,10 @@ struct AnthropicMessagesHandler: Sendable {
             return jsonError(.badRequest, type: "invalid_request_error", message: "JSON decode failed: \(error)")
         }
 
-        guard let modelId = payload.model, !modelId.isEmpty else {
+        guard let rawModelId = payload.model, !rawModelId.isEmpty else {
             return jsonError(.badRequest, type: "invalid_request_error", message: "missing 'model'")
         }
+        let modelId = ModelLoader.canonicalIdentifier(rawModelId)
 
         let container: ModelContainer
         if let loaded = await registry.get(modelId) {
