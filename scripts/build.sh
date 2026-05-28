@@ -16,6 +16,11 @@ xcodebuild \
   -derivedDataPath "$DERIVED" \
   -destination 'platform=macOS' \
   -skipMacroValidation \
+  ENABLE_CODE_COVERAGE=NO \
+  SWIFT_ENABLE_CODE_COVERAGE=NO \
+  CLANG_ENABLE_CODE_COVERAGE=NO \
+  GCC_GENERATE_TEST_COVERAGE_FILES=NO \
+  GCC_INSTRUMENT_PROGRAM_FLOW_ARCS=NO \
   build \
   | grep -vE '^(2026|note: |Note:|\s+[A-Z][a-z]+ \(in target)' \
   || true
@@ -25,6 +30,11 @@ if [ -x "$BINARY" ]; then
   echo "✓ built $BINARY"
 else
   echo "✗ build failed (no binary at $BINARY)" >&2
+  exit 1
+fi
+
+if [ "$CONFIGURATION" = "Release" ] && strings "$BINARY" | grep -Eq 'LLVM_PROFILE|__llvm_prf|__LLVM_PROFILE'; then
+  echo "✗ Release binary contains LLVM coverage/profiling runtime symbols" >&2
   exit 1
 fi
 
