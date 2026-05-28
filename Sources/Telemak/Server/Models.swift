@@ -141,6 +141,7 @@ struct ModelsHandler: Sendable {
         struct LoadBody: Decodable {
             let model: String
             let draft_model: String?
+            let force_llm: Bool?
             let allow_unverified_mtp: Bool?
         }
         let buf = try await request.body.collect(upTo: 1 << 16)
@@ -178,7 +179,7 @@ struct ModelsHandler: Sendable {
             return jsonResponse(.ok, data: data)
         } else {
             do {
-                let forceLLM = body.draft_model.map {
+                let forceLLM = body.force_llm ?? body.draft_model.map {
                     let draftType = ModelLoader.modelType(identifier: $0)
                     return draftType == "gemma4_assistant" || draftType == "qwen3_5_mtp"
                 } ?? false
