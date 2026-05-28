@@ -8,6 +8,12 @@ final class Settings: ObservableObject {
     @AppStorage("dashboard") var dashboard: String = "http://192.168.86.141:8000/"
     @AppStorage("pollInterval") var pollInterval: Double = 2.0
 
+    init() {
+        if let endpoint = ProcessInfo.processInfo.environment["TELEMAK_ENDPOINT"], !endpoint.isEmpty {
+            self.endpoint = endpoint
+        }
+    }
+
     var endpointURL: URL? { URL(string: endpoint) }
     var dashboardURL: URL? { URL(string: dashboard) }
 

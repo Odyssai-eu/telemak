@@ -13,7 +13,8 @@ struct TelemakMenuBarApp: App {
         let s = Settings()
         _settings = StateObject(wrappedValue: s)
         _poller = StateObject(wrappedValue: HealthPoller(settings: s))
-        if TelemakInstaller.isInstalled == false {
+        let skipInstaller = ProcessInfo.processInfo.environment["TELEMAK_SKIP_INSTALLER"] == "1"
+        if !skipInstaller && TelemakInstaller.isInstalled == false {
             DispatchQueue.main.async {
                 InstallerWindowController.shared.show()
             }
@@ -26,7 +27,10 @@ struct TelemakMenuBarApp: App {
         } label: {
             // Status icon: filled circle when up, dotted when down. Inherits
             // the menu-bar's dynamic color (so it adapts to light/dark mode).
-            Image(systemName: poller.isUp ? "circle.fill" : "circle.dotted")
+            HStack(spacing: 4) {
+                Image(systemName: poller.isUp ? "circle.fill" : "circle.dotted")
+                Text(telemakVersion)
+            }
         }
         .menuBarExtraStyle(.window)
 

@@ -6,7 +6,10 @@ import Foundation
 /// When pointing at a remote endpoint (e.g. 192.168.86.50:8003), the
 /// Start/Stop buttons are disabled.
 enum LaunchAgentControl {
-    static let label = "eu.odyssai.telemak"
+    static var label: String {
+        let value = ProcessInfo.processInfo.environment["TELEMAK_AGENT_LABEL"] ?? ""
+        return value.isEmpty ? "eu.odyssai.telemak" : value
+    }
     static var plistURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/LaunchAgents/\(label).plist")
