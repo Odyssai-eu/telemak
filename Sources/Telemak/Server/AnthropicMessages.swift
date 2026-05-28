@@ -12,6 +12,7 @@ import MLXLMCommon
 struct AnthropicMessagesHandler: Sendable {
     let registry: ModelRegistry
     let stats: StatsTracker
+    let activity: ActivityTracker
     let sessionStore: SessionStore?
 
     func add(to router: Router<BasicRequestContext>) {
@@ -99,18 +100,25 @@ struct AnthropicMessagesHandler: Sendable {
         }
         _ = cachedTokens // future: surface via usage extension
 
+        let activityId = await activity.begin(model: modelId, phase: .prefill)
         let genStart = Date()
         var completion = ""
         var info: GenerateCompletionInfo?
         do {
+            await activity.setPhase(activityId, .decode)
             for try await gen in session.streamDetails(to: prompt, images: imageBatch.images, videos: []) {
                 switch gen {
-                case .chunk(let s): completion += s
-                case .info(let i): info = i
+                case .chunk(let s):
+                    await activity.incrementGeneratedTokens(activityId)
+                    completion += s
+                case .info(let i):
+                    info = i
+                    await activity.setGeneratedTokens(activityId, i.generationTokenCount)
                 case .toolCall: break
                 }
             }
         } catch {
+            await activity.fail(activityId, error: "\(error)")
             return jsonError(.internalServerError, type: "api_error",
                               message: "model generation failed: \(error)")
         }
@@ -127,6 +135,8 @@ struct AnthropicMessagesHandler: Sendable {
 
         let promptTokens = info?.promptTokenCount ?? max(1, prompt.count / 4)
         let completionTokens = info?.generationTokenCount ?? max(1, completion.count / 4)
+        await activity.setGeneratedTokens(activityId, completionTokens)
+        await activity.finish(activityId)
         await stats.recordRequest(tokens: completionTokens, elapsedSeconds: elapsed)
 
         let response = AnthropicMessageResponse(
@@ -193,6 +203,7 @@ struct AnthropicMessagesHandler: Sendable {
             let genStart = Date()
             var completion = ""
             var info: GenerateCompletionInfo?
+            let activityId = await activity.begin(model: modelId, phase: .prefill)
 
             do {
                 // message_start
@@ -217,10 +228,14 @@ struct AnthropicMessagesHandler: Sendable {
                     "content_block": ["type": "text", "text": ""],
                 ])
 
+                await activity.setPhase(activityId, .decode)
                 for try await gen in session.streamDetails(to: prompt, images: images.images, videos: []) {
+                    await activity.setPhase(activityId, .decode)
                     switch gen {
                     case .chunk(let piece):
+                        await activity.incrementGeneratedTokens(activityId)
                         completion += piece
+                        await activity.setPhase(activityId, .streaming)
                         try await send(event: "content_block_delta", payload: [
                             "type": "content_block_delta",
                             "index": 0,
@@ -228,6 +243,7 @@ struct AnthropicMessagesHandler: Sendable {
                         ])
                     case .info(let i):
                         info = i
+                        await activity.setGeneratedTokens(activityId, i.generationTokenCount)
                     case .toolCall:
                         break
                     }
@@ -261,6 +277,7 @@ struct AnthropicMessagesHandler: Sendable {
                     "type": "message_stop",
                 ])
             } catch {
+                await activity.fail(activityId, error: "\(error)")
                 try? await send(event: "error", payload: [
                     "type": "error",
                     "error": ["type": "api_error", "message": "\(error)"],
@@ -269,6 +286,8 @@ struct AnthropicMessagesHandler: Sendable {
 
             let elapsed = Date().timeIntervalSince(genStart)
             let observed = info?.generationTokenCount ?? max(1, completion.count / 4)
+            await activity.setGeneratedTokens(activityId, observed)
+            await activity.finish(activityId)
             await stats.recordRequest(tokens: observed, elapsedSeconds: elapsed)
 
             if let sessionId, let sessionStore {

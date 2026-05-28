@@ -53,6 +53,13 @@ final class HealthPoller: ObservableObject {
     @Published var memoryUsedGB: Double = 0
     @Published var memoryFreeGB: Double = 0
     @Published var uptimeSeconds: Double = 0
+    @Published var activeRequests: Int = 0
+    @Published var currentModel: String?
+    @Published var currentRequestStartedAt: String?
+    @Published var currentGeneratedTokens: Int = 0
+    @Published var currentTokPerSec: Double?
+    @Published var currentPhase: String = "idle"
+    @Published var runtimeLastError: String?
     @Published var isUp: Bool = false
     @Published var agentState: LaunchAgentControl.AgentState = .notInstalled
     @Published var lastError: String?
@@ -108,13 +115,51 @@ final class HealthPoller: ObservableObject {
             memoryUsedGB = json["wired_memory_used_gb"] as? Double ?? 0
             memoryFreeGB = json["wired_memory_free_gb"] as? Double ?? 0
             uptimeSeconds = json["uptime_s"] as? Double ?? 0
+            await refreshActivity()
             lastError = nil
         } catch {
             isUp = false
             status = "Unreachable"
             runtimeVersion = nil
             modelsLoaded = []
+            clearActivity()
         }
+    }
+
+    private func refreshActivity() async {
+        guard let url = settings.endpointURL?.appendingPathComponent("/admin/activity") else {
+            clearActivity()
+            return
+        }
+        do {
+            var req = URLRequest(url: url)
+            req.timeoutInterval = 3.0
+            let (data, response) = try await URLSession.shared.data(for: req)
+            guard let code = (response as? HTTPURLResponse)?.statusCode, code == 200 else {
+                clearActivity()
+                return
+            }
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+            activeRequests = json["active_requests"] as? Int ?? 0
+            currentModel = json["current_model"] as? String
+            currentRequestStartedAt = json["current_request_started_at"] as? String
+            currentGeneratedTokens = json["current_generated_tokens"] as? Int ?? 0
+            currentTokPerSec = json["current_tok_s"] as? Double
+            currentPhase = json["current_phase"] as? String ?? "idle"
+            runtimeLastError = json["last_error"] as? String
+        } catch {
+            clearActivity()
+        }
+    }
+
+    private func clearActivity() {
+        activeRequests = 0
+        currentModel = nil
+        currentRequestStartedAt = nil
+        currentGeneratedTokens = 0
+        currentTokPerSec = nil
+        currentPhase = "idle"
+        runtimeLastError = nil
     }
 
     // MARK: - Service control
@@ -172,6 +217,8 @@ struct MenuBarPopover: View {
             header
             Divider()
             modelsSection
+            Divider()
+            activitySection
             Divider()
             metricsSection
             if let lastError = poller.lastError {
@@ -271,12 +318,59 @@ struct MenuBarPopover: View {
         .font(.subheadline)
     }
 
+    private var activitySection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Activity")
+                .font(.subheadline.weight(.semibold))
+            metricRow(
+                systemImage: poller.activeRequests > 0 ? "bolt.fill" : "pause",
+                label: "\(poller.activeRequests) active · \(poller.currentPhase)",
+                muted: poller.activeRequests == 0
+            )
+            if let model = poller.currentModel {
+                metricRow(
+                    systemImage: "cpu",
+                    label: model,
+                    muted: false
+                )
+            }
+            metricRow(
+                systemImage: "textformat.123",
+                label: "\(poller.currentGeneratedTokens) generated tokens",
+                muted: poller.currentGeneratedTokens == 0
+            )
+            metricRow(
+                systemImage: "speedometer",
+                label: poller.currentTokPerSec.map { String(format: "%.1f tok/s current", $0) } ?? "— tok/s current",
+                muted: poller.currentTokPerSec == nil
+            )
+            if let started = poller.currentRequestStartedAt {
+                metricRow(
+                    systemImage: "clock.badge",
+                    label: "Started: \(started)",
+                    muted: false
+                )
+            }
+            if let runtimeLastError = poller.runtimeLastError {
+                metricRow(
+                    systemImage: "exclamationmark.triangle",
+                    label: runtimeLastError,
+                    muted: false
+                )
+                .foregroundColor(.red)
+            }
+        }
+        .font(.subheadline)
+    }
+
     private func metricRow(systemImage: String, label: String, muted: Bool) -> some View {
         HStack {
             Image(systemName: systemImage)
                 .frame(width: 16)
             Text(label)
                 .textSelection(.enabled)
+                .lineLimit(1)
+                .truncationMode(.middle)
         }
         .foregroundColor(muted ? .secondary : .primary)
     }

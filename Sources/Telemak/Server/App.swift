@@ -6,6 +6,7 @@ import Logging
 func buildApplication(
     registry: ModelRegistry,
     stats: StatsTracker,
+    activity: ActivityTracker,
     sessionStore: SessionStore,
     wiredMemory: WiredMemoryCoordinator,
     startTime: Date,
@@ -20,9 +21,10 @@ func buildApplication(
     router.add(middleware: LogRequestsMiddleware(.info))
 
     HealthHandler(registry: registry, stats: stats, startTime: startTime).add(to: router)
-    ChatCompletionsHandler(registry: registry, stats: stats, sessionStore: sessionStore, wiredMemory: wiredMemory).add(to: router)
-    AnthropicMessagesHandler(registry: registry, stats: stats, sessionStore: sessionStore).add(to: router)
-    EmbeddingsHandler(registry: registry).add(to: router)
+    ActivityHandler(activity: activity).add(to: router)
+    ChatCompletionsHandler(registry: registry, stats: stats, activity: activity, sessionStore: sessionStore, wiredMemory: wiredMemory).add(to: router)
+    AnthropicMessagesHandler(registry: registry, stats: stats, activity: activity, sessionStore: sessionStore).add(to: router)
+    EmbeddingsHandler(registry: registry, activity: activity).add(to: router)
     ModelsHandler(registry: registry).add(to: router)
     SessionsHandler(sessionStore: sessionStore).add(to: router)
     CapabilitiesHandler(registry: registry).add(to: router)

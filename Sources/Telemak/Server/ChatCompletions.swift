@@ -8,6 +8,7 @@ import MLXRandom
 struct ChatCompletionsHandler: Sendable {
     let registry: ModelRegistry
     let stats: StatsTracker
+    let activity: ActivityTracker
     let sessionStore: SessionStore?
     let wiredMemory: WiredMemoryCoordinator?
 
@@ -140,6 +141,7 @@ struct ChatCompletionsHandler: Sendable {
                 toolSpecs: toolSpecs,
                 additionalContext: additionalContext,
                 stats: stats,
+                activity: activity,
                 sessionStore: sessionStore
             )
         }
@@ -181,6 +183,7 @@ struct ChatCompletionsHandler: Sendable {
             )
         }
 
+        let activityId = await activity.begin(model: modelId, phase: .prefill)
         let genStart = Date()
         var completion = ""
         var stopChecker = StopChecker(stops: stopSequences)
@@ -188,10 +191,12 @@ struct ChatCompletionsHandler: Sendable {
         var info: GenerateCompletionInfo?
         var collectedToolCalls: [ChatToolCall] = []
         do {
+            await activity.setPhase(activityId, .decode)
             try await runWithOptionalWiredLimit {
                 for try await gen in session.streamDetails(to: promptForGeneration, images: imageBatch.images, videos: []) {
                     switch gen {
                     case .chunk(let s):
+                        await activity.incrementGeneratedTokens(activityId)
                         let emitted = stopChecker.feed(s)
                         if !emitted.isEmpty { completion += emitted }
                         if stopChecker.hit {
@@ -199,6 +204,7 @@ struct ChatCompletionsHandler: Sendable {
                         }
                     case .info(let i):
                         info = i
+                        await activity.setGeneratedTokens(activityId, i.generationTokenCount)
                     case .toolCall(let call):
                         collectedToolCalls.append(toolCallToChat(call))
                     }
@@ -208,6 +214,7 @@ struct ChatCompletionsHandler: Sendable {
                 }
             }
         } catch {
+            await activity.fail(activityId, error: "\(error)")
             return jsonError(.internalServerError, code: "generation_failed",
                               message: "model generation failed: \(error)")
         }
@@ -224,6 +231,8 @@ struct ChatCompletionsHandler: Sendable {
 
         let promptTokens = info?.promptTokenCount ?? max(1, (promptForGeneration.count + (effectiveInstructions?.count ?? 0)) / 4)
         let completionTokens = info?.generationTokenCount ?? max(1, completion.count / 4)
+        await activity.setGeneratedTokens(activityId, completionTokens)
+        await activity.finish(activityId)
         await stats.recordRequest(tokens: completionTokens, elapsedSeconds: genElapsed)
 
         let usage = ChatCompletionResponse.Usage(
@@ -278,6 +287,7 @@ struct ChatCompletionsHandler: Sendable {
         toolSpecs: [[String: any Sendable]]?,
         additionalContext: [String: any Sendable]?,
         stats: StatsTracker,
+        activity: ActivityTracker,
         sessionStore: SessionStore?
     ) -> Response {
         let id = "chatcmpl-\(UUID().uuidString.lowercased())"
@@ -311,7 +321,9 @@ struct ChatCompletionsHandler: Sendable {
                 )
             }
 
+            let activityId = await activity.begin(model: modelId, phase: .prefill)
             func send(_ chunk: ChatCompletionChunk) async throws {
+                await activity.setPhase(activityId, .streaming)
                 let data = try encoder.encode(chunk)
                 var buffer = ByteBuffer()
                 buffer.writeString("data: ")
@@ -358,10 +370,13 @@ struct ChatCompletionsHandler: Sendable {
                 )
                 try await send(role)
 
+                await activity.setPhase(activityId, .decode)
                 try await runWithOptionalWiredLimit {
                     for try await gen in session.streamDetails(to: userPrompt, images: images.images, videos: []) {
+                        await activity.setPhase(activityId, .decode)
                         switch gen {
                         case .chunk(let piece):
+                            await activity.incrementGeneratedTokens(activityId)
                             let emit = stopChecker.feed(piece)
                             if !emit.isEmpty {
                                 pendingContent += emit
@@ -370,6 +385,7 @@ struct ChatCompletionsHandler: Sendable {
                             }
                         case .info(let i):
                             info = i
+                            await activity.setGeneratedTokens(activityId, i.generationTokenCount)
                         case .toolCall(let call):
                             try await flushPendingContent(force: true)
                             anyToolCalls = true
@@ -444,11 +460,14 @@ struct ChatCompletionsHandler: Sendable {
 
                 try await writer.write(ByteBuffer(string: "data: [DONE]\n\n"))
             } catch {
+                await activity.fail(activityId, error: "\(error)")
                 let payload = #"{"error":{"message":"streaming aborted: \#(error)","type":"generation_failed"}}"#
                 try? await writer.write(ByteBuffer(string: "data: \(payload)\n\n"))
             }
             let elapsed = Date().timeIntervalSince(genStart)
             let observedTokens = info?.generationTokenCount ?? 1
+            await activity.setGeneratedTokens(activityId, observedTokens)
+            await activity.finish(activityId)
             await stats.recordRequest(tokens: observedTokens, elapsedSeconds: elapsed)
 
             if let sessionId, let sessionStore {

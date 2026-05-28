@@ -50,6 +50,7 @@ struct Serve: AsyncParsableCommand {
             wiredMemory: wiredMemory
         )
         let stats = StatsTracker()
+        let activity = ActivityTracker()
 
         if !noReplay {
             await replayState(registry: registry, stateStore: stateStore, logger: logger)
@@ -58,6 +59,7 @@ struct Serve: AsyncParsableCommand {
         let app = buildApplication(
             registry: registry,
             stats: stats,
+            activity: activity,
             sessionStore: sessionStore,
             wiredMemory: wiredMemory,
             startTime: startTime,

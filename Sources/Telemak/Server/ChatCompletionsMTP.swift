@@ -112,20 +112,30 @@ extension ChatCompletionsHandler {
         cachedTokens: Int
     ) async throws -> Response {
         let genStart = Date()
-        let result: MTPRunResult = try await container.perform { ctx in
-            let promptTokens = try await prepareMTPPrompt(ctx: ctx, chatText: chatText)
-            guard !promptTokens.isEmpty else {
-                throw HTTPError(.badRequest, message: "empty prompt after tokenization")
+        let activityId = await activity.begin(model: modelId, phase: .prefill)
+        let result: MTPRunResult
+        do {
+            result = try await container.perform { ctx in
+                let promptTokens = try await prepareMTPPrompt(ctx: ctx, chatText: chatText)
+                guard !promptTokens.isEmpty else {
+                    throw HTTPError(.badRequest, message: "empty prompt after tokenization")
+                }
+                Task { await self.activity.setPhase(activityId, .decode) }
+                return try runMTPIteratorCollecting(
+                    ctx: ctx,
+                    draftEntry: draftEntry,
+                    promptTokens: promptTokens,
+                    params: params,
+                    stopSequences: stopSequences
+                )
             }
-            return try runMTPIteratorCollecting(
-                ctx: ctx,
-                draftEntry: draftEntry,
-                promptTokens: promptTokens,
-                params: params,
-                stopSequences: stopSequences
-            )
+        } catch {
+            await activity.fail(activityId, error: "\(error)")
+            throw error
         }
         let elapsed = Date().timeIntervalSince(genStart)
+        await activity.setGeneratedTokens(activityId, result.tokensGenerated)
+        await activity.finish(activityId)
         await stats.recordRequest(tokens: result.tokensGenerated, elapsedSeconds: elapsed)
 
         let response = ChatCompletionResponse(
@@ -206,6 +216,7 @@ extension ChatCompletionsHandler {
             var promptTokenCount = 0
             var completionTokenCount = 0
             var visiblePieces: [String] = []
+            let activityId = await activity.begin(model: modelId, phase: .prefill)
 
             do {
                 let result: MTPStreamingResult = try await container.perform { ctx in
@@ -213,6 +224,7 @@ extension ChatCompletionsHandler {
                     guard !promptTokens.isEmpty else {
                         throw HTTPError(.badRequest, message: "empty prompt after tokenization")
                     }
+                    Task { await self.activity.setPhase(activityId, .decode) }
                     let collected = try runMTPIteratorCollectingPieces(
                         ctx: ctx,
                         draftEntry: draftEntry,
@@ -229,12 +241,14 @@ extension ChatCompletionsHandler {
                 promptTokenCount = result.promptTokens
                 completionTokenCount = result.tokensGenerated
                 visiblePieces = result.pieces
+                await activity.setGeneratedTokens(activityId, completionTokenCount)
 
                 // Emit each piece as its own SSE chunk so the client sees
                 // a stream-shaped delta sequence even though the work is
                 // already done. UI behaviour is identical to a real-time
                 // stream of the same payload size.
                 for piece in visiblePieces where !piece.isEmpty {
+                    await activity.setPhase(activityId, .streaming)
                     let chunk = ChatCompletionChunk(
                         id: id, object: "chat.completion.chunk",
                         created: created, model: modelId,
@@ -277,11 +291,14 @@ extension ChatCompletionsHandler {
 
                 try await writer.write(ByteBuffer(string: "data: [DONE]\n\n"))
             } catch {
+                await activity.fail(activityId, error: "\(error)")
                 let payload = #"{"error":{"message":"mtp generation failed: \#(error)","type":"generation_failed"}}"#
                 try? await writer.write(ByteBuffer(string: "data: \(payload)\n\n"))
             }
 
             let elapsed = Date().timeIntervalSince(genStart)
+            await activity.setGeneratedTokens(activityId, completionTokenCount)
+            await activity.finish(activityId)
             await stats.recordRequest(tokens: completionTokenCount, elapsedSeconds: elapsed)
 
             try await writer.finish(nil)

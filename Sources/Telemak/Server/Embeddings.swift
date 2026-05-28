@@ -5,6 +5,7 @@ import MLX
 /// OpenAI-compatible `POST /v1/embeddings`.
 struct EmbeddingsHandler: Sendable {
     let registry: ModelRegistry
+    let activity: ActivityTracker
 
     func add(to router: Router<BasicRequestContext>) {
         router.post("/v1/embeddings") { request, _ async throws -> Response in
@@ -36,8 +37,11 @@ struct EmbeddingsHandler: Sendable {
         }
 
         let inputs = body.input.values
+        let activityId = await activity.begin(model: modelId, phase: .prefill)
         do {
             let (vectors, tokenCount) = try await embed(inputs: inputs, using: loaded)
+            await activity.setGeneratedTokens(activityId, tokenCount)
+            await activity.finish(activityId)
             let data = vectors.enumerated().map { index, vector in
                 EmbeddingsResponse.Item(
                     object: "embedding",
@@ -54,6 +58,7 @@ struct EmbeddingsHandler: Sendable {
             let encoded = try JSONEncoder().encode(payload)
             return jsonResponse(.ok, data: encoded)
         } catch {
+            await activity.fail(activityId, error: "\(error)")
             return jsonError(.serviceUnavailable, code: "embedding_failed", message: "\(error)")
         }
     }
