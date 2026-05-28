@@ -146,11 +146,18 @@ public enum ModelLoader {
         if aliasedMiniMaxM2 {
             root["model_type"] = "minimax"
         }
+        let normalizedMistral3EOS = (root["model_type"] as? String) == "mistral3"
+            && root["eos_token_id"] is Int
+        if normalizedMistral3EOS, let eos = root["eos_token_id"] as? Int {
+            root["eos_token_id"] = [eos]
+        }
 
         // Already has `quantization`? Nothing to fix (modulo the
         // vision_config strip above).
         guard root["quantization"] == nil, let quantConfig = root["quantization_config"] else {
-            if !droppedEmptyVision && !aliasedMiniMaxM2 { return originalDir }
+            if !droppedEmptyVision && !aliasedMiniMaxM2 && !normalizedMistral3EOS {
+                return originalDir
+            }
             // Still need to stage the dir to rewrite config.json with
             // vision_config removed ; fall through to the staging
             // block below by injecting an empty quantization carrier.
@@ -172,15 +179,22 @@ public enum ModelLoader {
         if enriched["bits"] == nil {
             enriched["bits"] = 8
         }
+        if enriched["mode"] == nil {
+            enriched["mode"] = "affine"
+        }
         for (key, value) in enriched {
             if var nested = value as? [String: Any], nested["bits"] == nil,
                nested["group_size"] != nil
             {
                 nested["bits"] = 8
+                if nested["mode"] == nil {
+                    nested["mode"] = "affine"
+                }
                 enriched[key] = nested
             }
         }
         root["quantization"] = enriched
+        root["quantization_config"] = enriched
 
         return try writeStaged(originalDir: originalDir, root: root, id: id)
     }
