@@ -323,6 +323,31 @@ struct ChatCompletionsHandler: Sendable {
             var stopChecker = StopChecker(stops: stopSequences)
             var info: GenerateCompletionInfo?
             var anyToolCalls = false
+            var pendingContent = ""
+            var pendingPieces = 0
+            let maxPiecesPerChunk = 10
+            let maxCharactersPerChunk = 512
+
+            func flushPendingContent(force: Bool = false) async throws {
+                guard !pendingContent.isEmpty else { return }
+                if !force,
+                   pendingPieces < maxPiecesPerChunk,
+                   pendingContent.count < maxCharactersPerChunk
+                {
+                    return
+                }
+
+                let content = pendingContent
+                pendingContent.removeAll(keepingCapacity: true)
+                pendingPieces = 0
+
+                let chunk = ChatCompletionChunk(
+                    id: id, object: "chat.completion.chunk",
+                    created: created, model: modelId,
+                    choices: [.init(index: 0, delta: .init(role: nil, content: content), finishReason: nil)]
+                )
+                try await send(chunk)
+            }
 
             do {
                 let role = ChatCompletionChunk(
@@ -332,47 +357,44 @@ struct ChatCompletionsHandler: Sendable {
                 )
                 try await send(role)
 
-                for try await gen in session.streamDetails(to: userPrompt, images: images.images, videos: []) {
-                    switch gen {
-                    case .chunk(let piece):
-                        let emit = stopChecker.feed(piece)
-                        if !emit.isEmpty {
+                try await runWithOptionalWiredLimit {
+                    for try await gen in session.streamDetails(to: userPrompt, images: images.images, videos: []) {
+                        switch gen {
+                        case .chunk(let piece):
+                            let emit = stopChecker.feed(piece)
+                            if !emit.isEmpty {
+                                pendingContent += emit
+                                pendingPieces += 1
+                                try await flushPendingContent()
+                            }
+                        case .info(let i):
+                            info = i
+                        case .toolCall(let call):
+                            try await flushPendingContent(force: true)
+                            anyToolCalls = true
+                            let chatCall = self.toolCallToChat(call)
                             let chunk = ChatCompletionChunk(
                                 id: id, object: "chat.completion.chunk",
                                 created: created, model: modelId,
-                                choices: [.init(index: 0, delta: .init(role: nil, content: emit), finishReason: nil)]
+                                choices: [.init(
+                                    index: 0,
+                                    delta: .init(role: nil, content: nil, toolCalls: [chatCall]),
+                                    finishReason: nil
+                                )]
                             )
                             try await send(chunk)
                         }
-                    case .info(let i):
-                        info = i
-                    case .toolCall(let call):
-                        anyToolCalls = true
-                        let chatCall = self.toolCallToChat(call)
-                        let chunk = ChatCompletionChunk(
-                            id: id, object: "chat.completion.chunk",
-                            created: created, model: modelId,
-                            choices: [.init(
-                                index: 0,
-                                delta: .init(role: nil, content: nil, toolCalls: [chatCall]),
-                                finishReason: nil
-                            )]
-                        )
-                        try await send(chunk)
+                        if stopChecker.hit { break }
                     }
-                    if stopChecker.hit { break }
                 }
                 if !stopChecker.hit {
                     let tail = stopChecker.flushRemaining()
                     if !tail.isEmpty {
-                        let chunk = ChatCompletionChunk(
-                            id: id, object: "chat.completion.chunk",
-                            created: created, model: modelId,
-                            choices: [.init(index: 0, delta: .init(role: nil, content: tail), finishReason: nil)]
-                        )
-                        try await send(chunk)
+                        pendingContent += tail
+                        pendingPieces += 1
                     }
                 }
+                try await flushPendingContent(force: true)
 
                 let finishReason = anyToolCalls ? "tool_calls" : "stop"
                 let stop = ChatCompletionChunk(
