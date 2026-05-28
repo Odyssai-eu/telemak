@@ -96,6 +96,12 @@ public enum ModelLoader {
                     using: #huggingFaceTokenizerLoader()
                 )
             }
+            if isVisionModel(root: root) {
+                return try await VLMModelFactory.shared.loadContainer(
+                    from: prepared,
+                    using: #huggingFaceTokenizerLoader()
+                )
+            }
         }
         return try await loadModelContainer(
             from: prepared,
@@ -260,6 +266,29 @@ public enum ModelLoader {
             return true
         }
         return false
+    }
+
+    private static func isVisionModel(root: [String: Any]) -> Bool {
+        if let visionConfig = root["vision_config"] as? [String: Any], !visionConfig.isEmpty {
+            return true
+        }
+
+        let modelType = (root["model_type"] as? String ?? "").lowercased()
+        let knownVLMTypes: Set<String> = [
+            "paligemma", "qwen2_vl", "qwen2_5_vl", "qwen3_vl", "idefics3",
+            "gemma4", "smolvlm", "fastvlm", "llava_qwen2", "pixtral",
+            "mistral3", "lfm2_vl", "lfm2-vl", "glm_ocr",
+        ]
+        if knownVLMTypes.contains(modelType) {
+            return true
+        }
+
+        let architectures = (root["architectures"] as? [String] ?? []).map { $0.lowercased() }
+        let haystack = ([modelType] + architectures).joined(separator: " ")
+        return haystack.contains("vlm")
+            || haystack.contains("vision")
+            || haystack.contains("_vl")
+            || haystack.contains("vl_")
     }
 
     public static func modelType(identifier: String) -> String? {
