@@ -142,11 +142,15 @@ public enum ModelLoader {
             root["vision_config"] = nil
             droppedEmptyVision = true
         }
+        let aliasedMiniMaxM2 = (root["model_type"] as? String) == "minimax_m2"
+        if aliasedMiniMaxM2 {
+            root["model_type"] = "minimax"
+        }
 
         // Already has `quantization`? Nothing to fix (modulo the
         // vision_config strip above).
         guard root["quantization"] == nil, let quantConfig = root["quantization_config"] else {
-            if !droppedEmptyVision { return originalDir }
+            if !droppedEmptyVision && !aliasedMiniMaxM2 { return originalDir }
             // Still need to stage the dir to rewrite config.json with
             // vision_config removed ; fall through to the staging
             // block below by injecting an empty quantization carrier.
