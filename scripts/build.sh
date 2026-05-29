@@ -10,7 +10,10 @@ DERIVED="${ROOT}/.xcbuild"
 
 cd "$ROOT"
 
-xcodebuild \
+LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/telemak-build.XXXXXX.log")"
+trap 'rm -f "$LOG_FILE"' EXIT
+
+if xcodebuild \
   -scheme Telemak-Package \
   -configuration "$CONFIGURATION" \
   -derivedDataPath "$DERIVED" \
@@ -21,9 +24,18 @@ xcodebuild \
   CLANG_ENABLE_CODE_COVERAGE=NO \
   GCC_GENERATE_TEST_COVERAGE_FILES=NO \
   GCC_INSTRUMENT_PROGRAM_FLOW_ARCS=NO \
-  build \
-  | grep -vE '^(2026|note: |Note:|\s+[A-Z][a-z]+ \(in target)' \
-  || true
+  build >"$LOG_FILE" 2>&1; then
+  BUILD_STATUS=0
+else
+  BUILD_STATUS=$?
+fi
+
+grep -vE '^(2026|note: |Note:|\s+[A-Z][a-z]+ \(in target)' "$LOG_FILE" || true
+
+if [ "$BUILD_STATUS" -ne 0 ]; then
+  echo "✗ xcodebuild failed with status $BUILD_STATUS" >&2
+  exit "$BUILD_STATUS"
+fi
 
 BINARY="$DERIVED/Build/Products/$CONFIGURATION/telemak"
 if [ -x "$BINARY" ]; then

@@ -104,6 +104,37 @@ enum JSONValue: Codable, Sendable {
         case .object(let o): return o.mapValues { $0.toSendable() }
         }
     }
+
+    /// Unwrap JSON for HuggingFace chat templates.
+    ///
+    /// The swift-transformers Jinja bridge cannot convert `NSNull`/optional
+    /// values reliably. Tool schemas may contain JSON nulls in optional fields;
+    /// dropping them matches how Python template renderers treat absent
+    /// optional schema keys and avoids model-specific 500s.
+    func toTemplateSendable() -> (any Sendable)? {
+        switch self {
+        case .null:
+            return nil
+        case .bool(let b):
+            return b
+        case .int(let i):
+            return i
+        case .double(let d):
+            return d
+        case .string(let s):
+            return s
+        case .array(let values):
+            return values.compactMap { $0.toTemplateSendable() }
+        case .object(let object):
+            var result: [String: any Sendable] = [:]
+            for (key, value) in object {
+                if let sendable = value.toTemplateSendable() {
+                    result[key] = sendable
+                }
+            }
+            return result
+        }
+    }
 }
 
 /// OpenAI accepts `stop` as either a single string or array of strings.

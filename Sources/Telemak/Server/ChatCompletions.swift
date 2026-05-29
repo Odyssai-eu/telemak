@@ -59,7 +59,13 @@ struct ChatCompletionsHandler: Sendable {
         let toolSpecs: [[String: any Sendable]]? = payload.tools.map { values in
             values.compactMap { value in
                 if case .object(let dict) = value {
-                    return dict.mapValues { $0.toSendable() }
+                    var spec: [String: any Sendable] = [:]
+                    for (key, json) in dict {
+                        if let sendable = json.toTemplateSendable() {
+                            spec[key] = sendable
+                        }
+                    }
+                    return spec
                 }
                 return nil
             }
