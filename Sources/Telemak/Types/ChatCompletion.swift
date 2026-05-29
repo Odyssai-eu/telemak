@@ -178,17 +178,29 @@ struct ChatMessage: Codable, Sendable {
     var role: String
     var content: ChatMessageContent?
     var toolCalls: [ChatToolCall]?
+    var toolCallId: String?
+    var name: String?
 
     enum CodingKeys: String, CodingKey {
         case role
         case content
         case toolCalls = "tool_calls"
+        case toolCallId = "tool_call_id"
+        case name
     }
 
-    init(role: String, content: String?, toolCalls: [ChatToolCall]? = nil) {
+    init(
+        role: String,
+        content: String?,
+        toolCalls: [ChatToolCall]? = nil,
+        toolCallId: String? = nil,
+        name: String? = nil
+    ) {
         self.role = role
         self.content = content.map { .string($0) }
         self.toolCalls = toolCalls
+        self.toolCallId = toolCallId
+        self.name = name
     }
 }
 

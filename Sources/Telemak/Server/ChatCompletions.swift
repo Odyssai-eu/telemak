@@ -88,6 +88,22 @@ struct ChatCompletionsHandler: Sendable {
         } catch {
             return jsonError(.badRequest, code: "invalid_request_error", message: "\(error.localizedDescription)")
         }
+        let hasToolHistory = payload.messages.contains { message in
+            message.role == "tool" || !(message.toolCalls?.isEmpty ?? true)
+        }
+
+        if hasToolHistory {
+            return try await structuredMessagesResponse(
+                payload: payload,
+                container: container,
+                modelId: modelId,
+                params: params,
+                stopSequences: stopSequences,
+                imageBatch: imageBatch,
+                toolSpecs: toolSpecs,
+                additionalContext: additionalContext
+            )
+        }
 
         // session_id from body OR X-Session-Id header. Cache hit if SessionStore
         // has an entry for (session_id, modelId) — we then prefill ONLY the
@@ -287,6 +303,137 @@ struct ChatCompletionsHandler: Sendable {
     }
 
     // MARK: - Streaming
+
+    private func structuredMessagesResponse(
+        payload: ChatCompletionRequest,
+        container: ModelContainer,
+        modelId: String,
+        params: GenerateParameters,
+        stopSequences: [String],
+        imageBatch: VisionImageBatch,
+        toolSpecs: [[String: any Sendable]]?,
+        additionalContext: [String: any Sendable]?
+    ) async throws -> Response {
+        if !imageBatch.images.isEmpty {
+            return jsonError(
+                .badRequest,
+                code: "unsupported_request_error",
+                message: "tool-history requests with image content are not supported yet"
+            )
+        }
+
+        let rawMessages = rawTemplateMessages(from: payload.messages, system: payload.system)
+        if payload.stream == true {
+            return streamingStructuredMessagesResponse(
+                container: container,
+                rawMessages: rawMessages,
+                params: params,
+                modelId: modelId,
+                stopSequences: stopSequences,
+                toolSpecs: toolSpecs,
+                additionalContext: additionalContext
+            )
+        }
+
+        let input = UserInput(
+            messages: rawMessages,
+            tools: toolSpecs,
+            additionalContext: additionalContext
+        )
+        let activityId = await activity.begin(model: modelId, phase: .prefill)
+        let genStart = Date()
+        var completion = ""
+        var stopChecker = StopChecker(stops: stopSequences)
+        var info: GenerateCompletionInfo?
+        var collectedToolCalls: [ChatToolCall] = []
+
+        do {
+            await activity.setPhase(activityId, .decode)
+            let stream = try await makeRawGenerationStream(
+                container: container,
+                input: input,
+                params: params,
+                toolSpecs: toolSpecs
+            )
+            try await runWithOptionalWiredLimit {
+                for await gen in stream {
+                    switch gen {
+                    case .chunk(let s):
+                        await activity.incrementGeneratedTokens(activityId)
+                        let emitted = stopChecker.feed(s)
+                        if !emitted.isEmpty { completion += emitted }
+                        if stopChecker.hit { break }
+                    case .info(let i):
+                        info = i
+                        await activity.setGeneratedTokens(activityId, i.generationTokenCount)
+                    case .toolCall(let call):
+                        collectedToolCalls.append(toolCallToChat(call))
+                    }
+                }
+                if !stopChecker.hit {
+                    completion += stopChecker.flushRemaining()
+                }
+            }
+        } catch {
+            await activity.fail(activityId, error: "\(error)")
+            return jsonError(
+                .internalServerError,
+                code: "generation_failed",
+                message: "model generation failed: \(error)"
+            )
+        }
+
+        let genElapsed = Date().timeIntervalSince(genStart)
+        if collectedToolCalls.isEmpty {
+            let recovered = recoverTaggedToolCalls(from: completion)
+            if !recovered.toolCalls.isEmpty {
+                completion = recovered.content
+                collectedToolCalls = recovered.toolCalls
+            }
+        }
+
+        if !collectedToolCalls.isEmpty {
+            completion = cleanContentBeforeToolCall(completion)
+        }
+
+        let promptTokens = info?.promptTokenCount ?? max(1, rawMessages.description.count / 4)
+        let completionTokens = info?.generationTokenCount ?? max(1, completion.count / 4)
+        await activity.setGeneratedTokens(activityId, completionTokens)
+        await activity.finish(activityId)
+        await stats.recordRequest(tokens: completionTokens, elapsedSeconds: genElapsed)
+
+        let usage = ChatCompletionResponse.Usage(
+            promptTokens: promptTokens,
+            completionTokens: completionTokens,
+            totalTokens: promptTokens + completionTokens,
+            promptTokensDetails: nil
+        )
+        let finishReason = collectedToolCalls.isEmpty ? "stop" : "tool_calls"
+        let response = ChatCompletionResponse(
+            id: "chatcmpl-\(UUID().uuidString.lowercased())",
+            object: "chat.completion",
+            created: Int(Date().timeIntervalSince1970),
+            model: modelId,
+            choices: [
+                .init(
+                    index: 0,
+                    message: ChatMessage(
+                        role: "assistant",
+                        content: collectedToolCalls.isEmpty ? completion : (completion.isEmpty ? nil : completion),
+                        toolCalls: collectedToolCalls.isEmpty ? nil : collectedToolCalls
+                    ),
+                    finishReason: finishReason
+                )
+            ],
+            usage: usage
+        )
+        let data = try JSONEncoder().encode(response)
+        return Response(
+            status: .ok,
+            headers: [.contentType: "application/json"],
+            body: ResponseBody(byteBuffer: ByteBuffer(data: data))
+        )
+    }
 
     private func streamingResponse(
         container: ModelContainer,
@@ -507,6 +654,179 @@ struct ChatCompletionsHandler: Sendable {
         )
     }
 
+    private func streamingStructuredMessagesResponse(
+        container: ModelContainer,
+        rawMessages: [[String: any Sendable]],
+        params: GenerateParameters,
+        modelId: String,
+        stopSequences: [String],
+        toolSpecs: [[String: any Sendable]]?,
+        additionalContext: [String: any Sendable]?
+    ) -> Response {
+        let id = "chatcmpl-\(UUID().uuidString.lowercased())"
+        let created = Int(Date().timeIntervalSince1970)
+
+        let body = ResponseBody(contentLength: nil) { writer in
+            let encoder = JSONEncoder()
+            func send(_ chunk: ChatCompletionChunk) async throws {
+                let data = try encoder.encode(chunk)
+                var buffer = ByteBuffer()
+                buffer.writeString("data: ")
+                buffer.writeBytes(data)
+                buffer.writeString("\n\n")
+                try await writer.write(buffer)
+            }
+
+            let activityId = await activity.begin(model: modelId, phase: .prefill)
+            let genStart = Date()
+            var stopChecker = StopChecker(stops: stopSequences)
+            var info: GenerateCompletionInfo?
+            var anyToolCalls = false
+            var pendingContent = ""
+            var pendingPieces = 0
+            let maxPiecesPerChunk = 10
+            let maxCharactersPerChunk = 512
+
+            func flushPendingContent(force: Bool = false) async throws {
+                guard !pendingContent.isEmpty else { return }
+                if !force,
+                   pendingPieces < maxPiecesPerChunk,
+                   pendingContent.count < maxCharactersPerChunk
+                {
+                    return
+                }
+
+                let content = pendingContent
+                pendingContent.removeAll(keepingCapacity: true)
+                pendingPieces = 0
+                try await send(.init(
+                    id: id,
+                    object: "chat.completion.chunk",
+                    created: created,
+                    model: modelId,
+                    choices: [.init(index: 0, delta: .init(role: nil, content: content), finishReason: nil)]
+                ))
+            }
+
+            do {
+                try await send(.init(
+                    id: id,
+                    object: "chat.completion.chunk",
+                    created: created,
+                    model: modelId,
+                    choices: [.init(index: 0, delta: .init(role: "assistant", content: nil), finishReason: nil)]
+                ))
+
+                let input = UserInput(
+                    messages: rawMessages,
+                    tools: toolSpecs,
+                    additionalContext: additionalContext
+                )
+                let stream = try await makeRawGenerationStream(
+                    container: container,
+                    input: input,
+                    params: params,
+                    toolSpecs: toolSpecs
+                )
+
+                await activity.setPhase(activityId, .decode)
+                try await runWithOptionalWiredLimit {
+                    for await gen in stream {
+                        switch gen {
+                        case .chunk(let piece):
+                            await activity.incrementGeneratedTokens(activityId)
+                            let emit = stopChecker.feed(piece)
+                            if !emit.isEmpty {
+                                pendingContent += emit
+                                pendingPieces += 1
+                                try await flushPendingContent()
+                            }
+                            if stopChecker.hit { break }
+                        case .info(let i):
+                            info = i
+                            await activity.setGeneratedTokens(activityId, i.generationTokenCount)
+                        case .toolCall(let call):
+                            try await flushPendingContent(force: true)
+                            anyToolCalls = true
+                            try await send(.init(
+                                id: id,
+                                object: "chat.completion.chunk",
+                                created: created,
+                                model: modelId,
+                                choices: [.init(
+                                    index: 0,
+                                    delta: .init(role: nil, content: nil, toolCalls: [toolCallToChat(call)]),
+                                    finishReason: nil
+                                )]
+                            ))
+                        }
+                    }
+                    if !stopChecker.hit {
+                        let tail = stopChecker.flushRemaining()
+                        if !tail.isEmpty {
+                            pendingContent += tail
+                            pendingPieces += 1
+                        }
+                    }
+                }
+                try await flushPendingContent(force: true)
+
+                let finishReason = anyToolCalls ? "tool_calls" : "stop"
+                try await send(.init(
+                    id: id,
+                    object: "chat.completion.chunk",
+                    created: created,
+                    model: modelId,
+                    choices: [.init(index: 0, delta: .init(role: nil, content: nil), finishReason: finishReason)]
+                ))
+
+                let promptTokens = info?.promptTokenCount ?? max(1, rawMessages.description.count / 4)
+                let completionTokens = info?.generationTokenCount ?? 1
+                let usageChunk: [String: Any] = [
+                    "id": id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": modelId,
+                    "choices": [],
+                    "usage": [
+                        "prompt_tokens": promptTokens,
+                        "completion_tokens": completionTokens,
+                        "total_tokens": promptTokens + completionTokens,
+                    ],
+                ]
+                if let payload = try? JSONSerialization.data(withJSONObject: usageChunk) {
+                    var buf = ByteBuffer()
+                    buf.writeString("data: ")
+                    buf.writeBytes(payload)
+                    buf.writeString("\n\n")
+                    try await writer.write(buf)
+                }
+                try await writer.write(ByteBuffer(string: "data: [DONE]\n\n"))
+            } catch {
+                await activity.fail(activityId, error: "\(error)")
+                let payload = #"{"error":{"message":"streaming aborted: \#(error)","type":"generation_failed"}}"#
+                try? await writer.write(ByteBuffer(string: "data: \(payload)\n\n"))
+            }
+
+            let elapsed = Date().timeIntervalSince(genStart)
+            let observedTokens = info?.generationTokenCount ?? 1
+            await activity.setGeneratedTokens(activityId, observedTokens)
+            await activity.finish(activityId)
+            await stats.recordRequest(tokens: observedTokens, elapsedSeconds: elapsed)
+            try await writer.finish(nil)
+        }
+
+        return Response(
+            status: .ok,
+            headers: [
+                .contentType: "text/event-stream",
+                .cacheControl: "no-cache",
+                .connection: "keep-alive",
+            ],
+            body: body
+        )
+    }
+
     // MARK: - Helpers
 
     /// Save the live cache from `session` to a fresh URL and register it in
@@ -554,6 +874,100 @@ struct ChatCompletionsHandler: Sendable {
         return try await WiredMemoryTicket.withWiredLimit(ticket, body)
     }
 
+    private func makeRawGenerationStream(
+        container: ModelContainer,
+        input: UserInput,
+        params: GenerateParameters,
+        toolSpecs: [[String: any Sendable]]?
+    ) async throws -> AsyncStream<Generation> {
+        try await container.perform(nonSendable: input) { context, input in
+            let lmInput = try await context.processor.prepare(input: input)
+            return try MLXLMCommon.generate(
+                input: lmInput,
+                parameters: params,
+                context: context,
+                tools: toolSpecs
+            )
+        }
+    }
+
+    private func rawTemplateMessages(
+        from messages: [ChatMessage],
+        system: String?
+    ) -> [[String: any Sendable]] {
+        var result: [[String: any Sendable]] = []
+        if let system, !messages.contains(where: { $0.role == "system" }) {
+            result.append(["role": "system", "content": system])
+        }
+        result.append(contentsOf: messages.map(rawTemplateMessage))
+        return result
+    }
+
+    private func rawTemplateMessage(_ message: ChatMessage) -> [String: any Sendable] {
+        var raw: [String: any Sendable] = ["role": message.role]
+        raw["content"] = message.content?.asPlainText ?? ""
+
+        if let toolCallId = message.toolCallId {
+            raw["tool_call_id"] = toolCallId
+        }
+        if let name = message.name {
+            raw["name"] = name
+        }
+        if let toolCalls = message.toolCalls, !toolCalls.isEmpty {
+            raw["tool_calls"] = toolCalls.map(rawTemplateToolCall)
+        }
+        return raw
+    }
+
+    private func rawTemplateToolCall(_ call: ChatToolCall) -> [String: any Sendable] {
+        [
+            "id": call.id,
+            "type": call.type,
+            "function": [
+                "name": call.function.name,
+                "arguments": decodeToolArgumentsForTemplate(call.function.arguments),
+            ] as [String: any Sendable],
+        ]
+    }
+
+    private func decodeToolArgumentsForTemplate(_ arguments: String) -> any Sendable {
+        guard let data = arguments.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data)
+        else {
+            return arguments
+        }
+        return sanitizeJSONObjectForTemplate(object) ?? arguments
+    }
+
+    private func sanitizeJSONObjectForTemplate(_ object: Any) -> (any Sendable)? {
+        switch object {
+        case let dict as [String: Any]:
+            var result: [String: any Sendable] = [:]
+            for (key, value) in dict {
+                if let clean = sanitizeJSONObjectForTemplate(value) {
+                    result[key] = clean
+                }
+            }
+            return result
+        case let array as [Any]:
+            return array.compactMap { sanitizeJSONObjectForTemplate($0) }
+        case let value as String:
+            return value
+        case let value as Bool:
+            return value
+        case let value as Int:
+            return value
+        case let value as Double:
+            return value
+        case let value as Float:
+            return Double(value)
+        case _ as NSNull:
+            return nil
+        default:
+            return String(describing: object)
+        }
+    }
+
     /// Convert mlx-swift-lm's `ToolCall` (`{function: {name, arguments:
     /// [String: JSONValue]}}`) to the OpenAI wire shape
     /// (`{id, type:"function", function:{name, arguments:"<json-string>"}}`).
@@ -599,6 +1013,18 @@ struct ChatCompletionsHandler: Sendable {
             remaining.trimmingCharacters(in: .whitespacesAndNewlines),
             calls
         )
+    }
+
+    private func cleanContentBeforeToolCall(_ content: String) -> String {
+        var clean = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        if clean == "</think>" {
+            return ""
+        }
+        if clean.hasSuffix("</think>") {
+            clean.removeLast("</think>".count)
+            clean = clean.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return clean
     }
 
     private func parseMiniMaxToolCall(_ block: String) -> ChatToolCall? {
