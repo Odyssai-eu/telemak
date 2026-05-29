@@ -15,7 +15,7 @@
 
 > Tu poses un `.app` sur un Mac Studio (ou un MacBook Pro), tu le lances
 > depuis le menu-bar, et tu as `/v1/chat/completions` + `/v1/messages` qui
-> servent Gemma 4, Qwen Coder Next, MiniMax ou Mistral en MLX natif —
+> servent Gemma 4, Qwen Coder Next, MiniMax ou d'autres modèles MLX natifs —
 > utilisable directement par Companion ou par n'importe quel client
 > OpenAI/Anthropic, ou enrôlable dans un cluster Odysseus comme provider
 > HTTP en deux clics.
@@ -693,7 +693,7 @@ Les trois projets sont distincts mais conçus pour s'emboîter :
 ## Référence rapide
 
 - **Repo** : `Odyssai-eu/telemak.git` (`~/Claude/code/telemak/`)
-- **Fork mlx-swift-lm** : `Odyssai-eu/mlx-swift-lm` (branche `feat/v2-mtp-hidden-states`)
+- **Fork mlx-swift-lm** : `Odyssai-eu/mlx-swift-lm` (fork runtime ; MTP branch conservée mais chantier suspendu)
 - **Binary** : `Telemak.app` (LaunchAgent `eu.odyssai.telemak.plist`)
 - **Version actuelle** : 0.6.15 (2026-05-29)
 - **Baseline stable** : tag `v0.6.15-stable`, bronze `Release.bronze-0.6.15`
