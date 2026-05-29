@@ -226,6 +226,14 @@ struct ChatCompletionsHandler: Sendable {
         }
         let genElapsed = Date().timeIntervalSince(genStart)
 
+        if collectedToolCalls.isEmpty {
+            let recovered = recoverTaggedToolCalls(from: completion)
+            if !recovered.toolCalls.isEmpty {
+                completion = recovered.content
+                collectedToolCalls = recovered.toolCalls
+            }
+        }
+
         if let sessionId, let sessionStore {
             await saveSessionCache(
                 session: session,
@@ -566,6 +574,75 @@ struct ChatCompletionsHandler: Sendable {
             type: "function",
             function: ChatToolCallFunction(name: call.function.name, arguments: argsString)
         )
+    }
+
+    private func recoverTaggedToolCalls(from text: String) -> (content: String, toolCalls: [ChatToolCall]) {
+        var remaining = text
+        var calls: [ChatToolCall] = []
+
+        while let start = remaining.range(of: "<minimax:tool_call>"),
+              let end = remaining.range(
+                  of: "</minimax:tool_call>",
+                  range: start.upperBound ..< remaining.endIndex
+              )
+        {
+            let block = String(remaining[start.lowerBound ..< end.upperBound])
+            if let call = parseMiniMaxToolCall(block) {
+                calls.append(call)
+                remaining.removeSubrange(start.lowerBound ..< end.upperBound)
+            } else {
+                break
+            }
+        }
+
+        return (
+            remaining.trimmingCharacters(in: .whitespacesAndNewlines),
+            calls
+        )
+    }
+
+    private func parseMiniMaxToolCall(_ block: String) -> ChatToolCall? {
+        guard let name = firstRegexGroup(#"<invoke\s+name="([^"]+)">"#, in: block) else {
+            return nil
+        }
+
+        var args: [String: String] = [:]
+        let pattern = #"<parameter\s+name="([^"]+)">([\s\S]*?)</parameter>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let nsRange = NSRange(block.startIndex ..< block.endIndex, in: block)
+        for match in regex.matches(in: block, range: nsRange) {
+            guard match.numberOfRanges == 3,
+                  let keyRange = Range(match.range(at: 1), in: block),
+                  let valueRange = Range(match.range(at: 2), in: block)
+            else { continue }
+            let key = String(block[keyRange])
+            let value = String(block[valueRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            args[key] = value
+        }
+
+        let argsString: String
+        if let data = try? JSONSerialization.data(withJSONObject: args),
+           let json = String(data: data, encoding: .utf8) {
+            argsString = json
+        } else {
+            argsString = "{}"
+        }
+
+        return ChatToolCall(
+            id: "call_\(UUID().uuidString.lowercased().prefix(24))",
+            type: "function",
+            function: ChatToolCallFunction(name: name, arguments: argsString)
+        )
+    }
+
+    private func firstRegexGroup(_ pattern: String, in text: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let nsRange = NSRange(text.startIndex ..< text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: nsRange),
+              match.numberOfRanges > 1,
+              let range = Range(match.range(at: 1), in: text)
+        else { return nil }
+        return String(text[range])
     }
 
     private func lastUserMessageOnly(_ messages: [ChatMessage]) -> String {
