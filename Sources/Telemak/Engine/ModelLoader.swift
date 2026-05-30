@@ -30,6 +30,17 @@ private let _mlxvlmTrampolineLoad: VLMModelFactory.Type = VLMModelFactory.self
 /// The Odysseus layout is `<org>/<name>/snapshots/<hash>/<files>` — NOT the
 /// standard HF cache `models--<org>--<name>/snapshots/...`. We don't try to
 /// reuse HubClient for it; we go straight to local-directory loading.
+
+// Thrown when an absolute model path escapes the configured models dir.
+// ModelRegistry.load() catches any error from ModelLoader.load() and
+// wraps it as LoadError.loadFailed(underlying:) — this struct ensures the
+// wrapped message is the same as a normal not-found, removing the oracle.
+private struct PathOutsideModelsDir: Error, CustomStringConvertible {
+    let path: String
+    init(_ path: String) { self.path = path }
+    var description: String { "model not found: '\(path)'" }
+}
+
 public enum ModelLoader {
     /// Convert an absolute model path under `TELEMAK_MODELS_DIR` back to
     /// its stable repository id (`org/name`). The registry, staged config
@@ -75,6 +86,16 @@ public enum ModelLoader {
         progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
     ) async throws -> ModelContainer {
         if identifier.hasPrefix("/") {
+            // Defense-in-depth: when TELEMAK_MODELS_DIR is set, reject absolute
+            // paths outside it. Returns the same error as a failed load so the
+            // caller can't distinguish "denied" from "missing config.json".
+            if let modelsDir = ProcessInfo.processInfo.environment["TELEMAK_MODELS_DIR"] {
+                let rootPath = URL(fileURLWithPath: modelsDir).standardized.path
+                let modelPath = URL(fileURLWithPath: identifier).standardized.path
+                guard modelPath == rootPath || modelPath.hasPrefix(rootPath + "/") else {
+                    throw PathOutsideModelsDir(identifier)
+                }
+            }
             if let url = resolveDirectory(at: identifier) {
                 let prepared = (try? prepareConfigForMLX(originalDir: url, id: identifier)) ?? url
                 return try await dispatchedLoad(prepared: prepared, forceLLM: forceLLM)

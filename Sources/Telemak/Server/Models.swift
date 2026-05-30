@@ -287,6 +287,34 @@ struct ModelsHandler: Sendable {
                 .badRequest, code: "invalid_request_error",
                 message: "expected {\"source\": \"<id>\", \"output\": \"<path?>\"}: \(error)")
         }
+        // Validate source — must be a clean HuggingFace org/name ID.
+        // Reject path separators, traversal sequences, and anything that
+        // isn't a safe repo reference before it reaches the Python module.
+        let sourcePattern = #"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$"#
+        guard body.source.range(of: sourcePattern, options: .regularExpression) != nil else {
+            return jsonError(.badRequest, code: "invalid_request_error",
+                             message: "source must be a HuggingFace model ID (org/name)")
+        }
+
+        // Validate output — must resolve under TELEMAK_MODELS_DIR or ~/.telemak.
+        if let out = body.output, !out.isEmpty {
+            let rootPaths: [String]
+            if let modelsDir = ProcessInfo.processInfo.environment["TELEMAK_MODELS_DIR"] {
+                rootPaths = [URL(fileURLWithPath: modelsDir).standardized.path]
+            } else {
+                let home = FileManager.default.homeDirectoryForCurrentUser
+                rootPaths = [home.appendingPathComponent(".telemak").standardized.path]
+            }
+            let outputPath = URL(fileURLWithPath: out).standardized.path
+            let contained = rootPaths.contains { root in
+                outputPath == root || outputPath.hasPrefix(root + "/")
+            }
+            if !contained {
+                return jsonError(.badRequest, code: "invalid_request_error",
+                                 message: "output path must be under the models directory")
+            }
+        }
+
         let pythonBin = ProcessInfo.processInfo.environment["TELEMAK_PYTHON"]
             ?? "/usr/bin/env"
         let module = "mlx_vlm.speculative.drafters.qwen3_5_mtp.split"

@@ -177,9 +177,25 @@ smoke_one() {
   activity=""
   tries=0
 
+  # Read API key from the remote host. Written by the installer to
+  # ~/telemak/api-key.txt (0600). Empty on pre-security-fix installs —
+  # the curl calls below still work because the middleware passes through
+  # when TELEMAK_API_KEY is unset in the plist.
+  api_key="$(ssh -n -o BatchMode=yes "$ssh_target" \
+    'cat ~/telemak/api-key.txt 2>/dev/null || echo ""' 2>/dev/null || echo "")"
+
+  # The server now binds 127.0.0.1 by default, so curl must run on the
+  # remote host via SSH rather than connecting from the deploy machine.
+  health_cmd="curl -fsS --max-time 5 http://127.0.0.1:${port}/health"
+  if [ -n "$api_key" ]; then
+    activity_cmd="curl -fsS --max-time 5 -H \"Authorization: Bearer ${api_key}\" http://127.0.0.1:${port}/admin/activity"
+  else
+    activity_cmd="curl -fsS --max-time 5 http://127.0.0.1:${port}/admin/activity"
+  fi
+
   while [ "$tries" -lt 15 ]; do
-    if health="$(curl -fsS --max-time 5 "http://$ip:$port/health" 2>/dev/null)" \
-      && activity="$(curl -fsS --max-time 5 "http://$ip:$port/admin/activity" 2>/dev/null)"; then
+    if health="$(ssh -n -o BatchMode=yes "$ssh_target" "$health_cmd" 2>/dev/null)" \
+      && activity="$(ssh -n -o BatchMode=yes "$ssh_target" "$activity_cmd" 2>/dev/null)"; then
       break
     fi
     tries=$((tries + 1))

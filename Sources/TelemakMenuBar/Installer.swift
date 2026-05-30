@@ -235,6 +235,15 @@ enum TelemakInstaller {
             throw InstallerError.missingResource("mlx-swift_Cmlx.bundle")
         }
 
+        // Generate a random bearer token and persist it at 0600 so the
+        // menu-bar app and remote clients can read it. A fresh token is
+        // written on every (re)install — rotate by reinstalling.
+        let apiKey = UUID().uuidString
+        let apiKeyFile = telemakRoot.appendingPathComponent("api-key.txt")
+        try apiKey.write(to: apiKeyFile, atomically: true, encoding: .utf8)
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: apiKeyFile.path)
+        log.append("Wrote API key to \(apiKeyFile.path) (0600)")
+
         let appExecutable = Bundle.main.executableURL?.path ?? "/Applications/Telemak.app/Contents/MacOS/Telemak"
         try writeLaunchAgent(
             serverPlist,
@@ -243,7 +252,7 @@ enum TelemakInstaller {
                 releaseDir.appendingPathComponent("telemak").path,
                 "serve",
                 "--host",
-                "0.0.0.0",
+                "127.0.0.1",
                 "--port",
                 "8003",
             ],
@@ -252,6 +261,7 @@ enum TelemakInstaller {
                 "PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
                 "TELEMAK_MODELS_DIR": modelsDir.path,
                 "TELEMAK_LOG_LEVEL": "info",
+                "TELEMAK_API_KEY": apiKey,
             ],
             stdout: telemakRoot.appendingPathComponent("launchd.out").path,
             stderr: telemakRoot.appendingPathComponent("launchd.err").path

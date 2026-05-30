@@ -17,6 +17,15 @@ final class Settings: ObservableObject {
     var endpointURL: URL? { URL(string: endpoint) }
     var dashboardURL: URL? { URL(string: dashboard) }
 
+    /// Bearer token for the local server. Read from ~/telemak/api-key.txt
+    /// which is written (0600) by the installer on every install.
+    var apiKey: String {
+        let keyFile = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("telemak/api-key.txt")
+        return (try? String(contentsOf: keyFile, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
     /// `true` when the endpoint points at the local machine — Start/Stop
     /// buttons only make sense for the local LaunchAgent.
     var endpointIsLocal: Bool {

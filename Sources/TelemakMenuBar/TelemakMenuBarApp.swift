@@ -134,6 +134,10 @@ final class HealthPoller: ObservableObject {
         do {
             var req = URLRequest(url: url)
             req.timeoutInterval = 3.0
+            let key = settings.apiKey
+            if !key.isEmpty {
+                req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            }
             let (data, response) = try await URLSession.shared.data(for: req)
             guard let code = (response as? HTTPURLResponse)?.statusCode, code == 200 else {
                 clearActivity()
