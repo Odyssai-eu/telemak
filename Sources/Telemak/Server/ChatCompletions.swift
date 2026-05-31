@@ -71,10 +71,14 @@ struct ChatCompletionsHandler: Sendable {
             }
         }
 
-        var additionalContext: [String: any Sendable]? = nil
+        var templateContext: [String: any Sendable] = [:]
         if let enableThinking = payload.enableThinking {
-            additionalContext = ["enable_thinking": enableThinking]
+            templateContext["enable_thinking"] = enableThinking
         }
+        if let reasoningEffort = payload.reasoningEffort, !reasoningEffort.isEmpty {
+            templateContext["reasoning_effort"] = reasoningEffort
+        }
+        let additionalContext: [String: any Sendable]? = templateContext.isEmpty ? nil : templateContext
 
         let instructions = payload.system ?? extractSystem(from: payload.messages)
         let userPrompt = renderUserPrompt(from: payload.messages)

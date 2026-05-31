@@ -19,6 +19,7 @@ struct ChatCompletionRequest: Codable, Sendable {
     var system: String?
     var sessionId: String?
     var enableThinking: Bool?
+    var reasoningEffort: String?
     /// OpenAI tool array. We accept any JSON, pass through to mlx-swift-lm.
     var tools: [JSONValue]?
     var toolChoice: JSONValue?
@@ -44,6 +45,7 @@ struct ChatCompletionRequest: Codable, Sendable {
         case system
         case sessionId = "session_id"
         case enableThinking = "enable_thinking"
+        case reasoningEffort = "reasoning_effort"
         case tools
         case toolChoice = "tool_choice"
         case kvBits = "kv_bits"
