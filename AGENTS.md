@@ -224,6 +224,53 @@ The shapes are kept byte-compatible with Odysseus' `scripts/api.py`. When
 in doubt, **Odysseus is the source of truth for what Companion expects** —
 match it.
 
+## Security audit triage — OdyssAI posture
+
+Directive as of **2026-05-31** : OdyssAI products are **self-hosted,
+LAN-first, mono-operator**. We secure the code; we do **not** manage the
+client's network security policy. Sort every security-audit finding into one
+of these buckets before changing behavior.
+
+### Bucket A — Always fix (code hygiene, not policy)
+
+- **Exploitable code** : injection (SSH `ProxyCommand`, path traversal,
+  process spawn from request bodies), RCE, SSRF, unsafe deserialization.
+  Network topology is irrelevant — fix it.
+- **No undocumented shared hardcoded secret/credential** in source, docs, or
+  templates. However, a documented generic default password that must be
+  changed at first login is acceptable and intentional for products that use
+  that model. Do **not** replace it with a silent per-install random secret.
+  Keep environment overrides.
+
+### Bucket B — Operator choice (option + docs, never forced)
+
+- Bind interface (`0.0.0.0` LAN vs `127.0.0.1`), mandatory API key, WAN
+  exposure.
+- Default must stay LAN-friendly and usable without configuration.
+  Hardening (API key, localhost-only, admin auth) is documented opt-in, not
+  default.
+- WAN exposure belongs to the operator: tunnel, firewall, reverse-proxy auth,
+  IP/MAC allowlist. We can recommend Cloudflare Tunnel, allowlists, or
+  reverse-proxy auth in docs; we do not impose a policy in Telemak.
+- Cross-repo constraint : Odysseus (`.39`) proxies Telemak nodes over the LAN
+  without sending a key. Therefore Telemak must not force `127.0.0.1` on
+  orchestrated nodes. If a Telemak API key ever becomes mandatory, Odysseus
+  must first learn to forward `Authorization: Bearer ...` on all upstream
+  calls, otherwise production breaks.
+
+### Concrete re-triage
+
+- Odysseus #20 (admin open by default) → **Bucket B** : keep open on LAN,
+  document opt-in hardening. Not a bug.
+- Telemak #53 (bind/auth) → **Bucket B** : LAN bind + optional key; never
+  force `127.0.0.1` on nodes.
+- Injection / path traversal / SSRF findings → **Bucket A** : fix.
+- Companion #4 (password) → default documented `itak1234`, no random
+  silent lockout.
+
+Golden rule : **secure the code, yes. Impose a network posture on the client,
+no — provide options and guidance.**
+
 ## 6. Current state — what works, what's in flight
 
 ### What works in production today
