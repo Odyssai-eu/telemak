@@ -66,7 +66,7 @@ struct BearerAuthMiddleware<Context: RequestContext>: RouterMiddleware {
 
         let header = request.headers[.authorization] ?? ""
         let prefix = "Bearer "
-        if header.hasPrefix(prefix), String(header.dropFirst(prefix.count)) == expected {
+        if header.hasPrefix(prefix), Self.constantTimeEquals(String(header.dropFirst(prefix.count)), expected) {
             return try await next(request, context)
         }
 
@@ -76,5 +76,18 @@ struct BearerAuthMiddleware<Context: RequestContext>: RouterMiddleware {
             headers: [.contentType: "application/json"],
             body: ResponseBody(byteBuffer: ByteBuffer(string: payload))
         )
+    }
+
+    private static func constantTimeEquals(_ candidate: String, _ expected: String) -> Bool {
+        let candidateBytes = Array(candidate.utf8)
+        let expectedBytes = Array(expected.utf8)
+        var diff = UInt8(candidateBytes.count == expectedBytes.count ? 0 : 1)
+
+        for index in expectedBytes.indices {
+            let candidateByte = index < candidateBytes.count ? candidateBytes[index] : 0
+            diff |= candidateByte ^ expectedBytes[index]
+        }
+
+        return diff == 0
     }
 }

@@ -1,4 +1,5 @@
 import CoreImage
+import Darwin
 import Foundation
 @preconcurrency import MLXLMCommon
 
@@ -13,6 +14,7 @@ enum VisionInputError: LocalizedError, Sendable {
     case imageTooLarge(Int)
     case urlFetchFailed(String)
     case invalidImage
+    case blockedPrivateImageURL(String)
 
     var errorDescription: String? {
         switch self {
@@ -28,6 +30,8 @@ enum VisionInputError: LocalizedError, Sendable {
             return "image URL fetch failed: \(message)"
         case .invalidImage:
             return "image payload could not be decoded"
+        case .blockedPrivateImageURL(let message):
+            return "blocked private image URL: \(message)"
         }
     }
 }
@@ -126,11 +130,16 @@ enum VisionInputs {
         else {
             throw VisionInputError.unsupportedImageSource(urlString)
         }
+        try validateRemoteImageURL(url)
 
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 5
         config.timeoutIntervalForResource = 5
-        let session = URLSession(configuration: config)
+        let session = URLSession(
+            configuration: config,
+            delegate: ImageURLFetchDelegate(),
+            delegateQueue: nil
+        )
         defer { session.finishTasksAndInvalidate() }
 
         do {
@@ -180,9 +189,165 @@ enum VisionInputs {
         return 2048
     }
 
+    fileprivate static func validateRemoteImageURL(_ url: URL) throws {
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+            throw VisionInputError.unsupportedImageSource(url.absoluteString)
+        }
+        guard let host = url.host, !host.isEmpty else {
+            throw VisionInputError.unsupportedImageSource(url.absoluteString)
+        }
+        guard !allowPrivateImageURLs() else { return }
+
+        let addresses = try resolvedAddresses(for: host)
+        guard !addresses.isEmpty else {
+            throw VisionInputError.urlFetchFailed("host '\(host)' did not resolve")
+        }
+        if let blocked = addresses.first(where: { $0.isBlockedForRemoteFetch }) {
+            throw VisionInputError.blockedPrivateImageURL("\(host) resolved to \(blocked)")
+        }
+    }
+
+    private static func allowPrivateImageURLs() -> Bool {
+        let raw = ProcessInfo.processInfo.environment["TELEMAK_ALLOW_PRIVATE_IMAGE_URLS"] ?? ""
+        switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "1", "true", "yes", "on":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func resolvedAddresses(for host: String) throws -> [ResolvedIPAddress] {
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_STREAM
+
+        var result: UnsafeMutablePointer<addrinfo>?
+        let status = getaddrinfo(host, nil, &hints, &result)
+        guard status == 0, let first = result else {
+            let message = String(cString: gai_strerror(status))
+            throw VisionInputError.urlFetchFailed("could not resolve host '\(host)': \(message)")
+        }
+        defer { freeaddrinfo(first) }
+
+        var addresses: [ResolvedIPAddress] = []
+        var current: UnsafeMutablePointer<addrinfo>? = first
+        while let pointer = current {
+            let info = pointer.pointee
+            if info.ai_family == AF_INET, let addr = info.ai_addr {
+                let sin = addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
+                addresses.append(.v4(UInt32(bigEndian: sin.sin_addr.s_addr)))
+            } else if info.ai_family == AF_INET6, let addr = info.ai_addr {
+                let sin6 = addr.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee }
+                let bytes = withUnsafeBytes(of: sin6.sin6_addr) { Array($0) }
+                addresses.append(.v6(bytes))
+            }
+            current = info.ai_next
+        }
+        return addresses
+    }
+
     private enum ImageReference {
         case base64(String)
         case openAIURL(String)
         case remoteURL(String)
+    }
+}
+
+private final class ImageURLFetchDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping @Sendable (URLRequest?) -> Void
+    ) {
+        guard let url = request.url, (try? VisionInputs.validateRemoteImageURL(url)) != nil else {
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
+    }
+}
+
+private enum ResolvedIPAddress: CustomStringConvertible {
+    case v4(UInt32)
+    case v6([UInt8])
+
+    var isBlockedForRemoteFetch: Bool {
+        switch self {
+        case .v4(let value):
+            return Self.isBlockedIPv4(value)
+        case .v6(let bytes):
+            if let mapped = Self.ipv4MappedAddress(bytes) {
+                return Self.isBlockedIPv4(mapped)
+            }
+            return isUnspecifiedIPv6(bytes)
+                || isLoopbackIPv6(bytes)
+                || isLinkLocalIPv6(bytes)
+                || isUniqueLocalIPv6(bytes)
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .v4(let value):
+            return [
+                UInt8((value >> 24) & 0xff),
+                UInt8((value >> 16) & 0xff),
+                UInt8((value >> 8) & 0xff),
+                UInt8(value & 0xff),
+            ].map(String.init).joined(separator: ".")
+        case .v6(let bytes):
+            var storage = bytes
+            return storage.withUnsafeMutableBytes { rawBuffer in
+                guard let base = rawBuffer.baseAddress else { return "<invalid-ipv6>" }
+                var output = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+                inet_ntop(AF_INET6, base, &output, socklen_t(INET6_ADDRSTRLEN))
+                return String(cString: output)
+            }
+        }
+    }
+
+    private static func isBlockedIPv4(_ value: UInt32) -> Bool {
+        let first = UInt8((value >> 24) & 0xff)
+        let second = UInt8((value >> 16) & 0xff)
+
+        return first == 0
+            || first == 10
+            || first == 127
+            || (first == 169 && second == 254)
+            || (first == 172 && (16...31).contains(second))
+            || (first == 192 && second == 168)
+    }
+
+    private static func ipv4MappedAddress(_ bytes: [UInt8]) -> UInt32? {
+        guard bytes.count == 16,
+              bytes[0..<10].allSatisfy({ $0 == 0 }),
+              bytes[10] == 0xff,
+              bytes[11] == 0xff
+        else {
+            return nil
+        }
+        return (UInt32(bytes[12]) << 24)
+            | (UInt32(bytes[13]) << 16)
+            | (UInt32(bytes[14]) << 8)
+            | UInt32(bytes[15])
+    }
+
+    private func isUnspecifiedIPv6(_ bytes: [UInt8]) -> Bool {
+        bytes.count == 16 && bytes.allSatisfy { $0 == 0 }
+    }
+
+    private func isLoopbackIPv6(_ bytes: [UInt8]) -> Bool {
+        bytes.count == 16 && bytes[0..<15].allSatisfy { $0 == 0 } && bytes[15] == 1
+    }
+
+    private func isLinkLocalIPv6(_ bytes: [UInt8]) -> Bool {
+        bytes.count == 16 && bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80
+    }
+
+    private func isUniqueLocalIPv6(_ bytes: [UInt8]) -> Bool {
+        bytes.count == 16 && (bytes[0] & 0xfe) == 0xfc
     }
 }

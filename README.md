@@ -117,6 +117,7 @@ This is one-time per machine. The `telemak` CLI binary doesn't trip Gatekeeper (
 | `HF_HUB_CACHE` | HuggingFace cache path | `~/.cache/huggingface/hub/` |
 | `TELEMAK_API_KEY` | Optional bearer token for `/admin/*`; inference endpoints stay open for LAN routing | unset → open |
 | `TELEMAK_CORS_ORIGIN` | `Access-Control-Allow-Origin` value | `*` |
+| `TELEMAK_ALLOW_PRIVATE_IMAGE_URLS` | Opt-in override for fetching `image_url` from loopback, link-local, or private LAN addresses | unset → blocked |
 | `TELEMAK_MAX_SESSIONS` | Max KV-cached sessions in memory | `32` |
 | `TELEMAK_LOG_LEVEL` | `trace`, `debug`, `info`, `notice`, `warning`, `error`, `critical` | `info` |
 | `TELEMAK_LOAD_DEBUG` | Non-empty → emit per-step timing of `ModelRegistry.load` to stderr | unset (silent) |

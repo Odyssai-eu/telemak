@@ -57,6 +57,7 @@ public actor ModelRegistry {
     private let stateStore: StateStore?
     private let sessionStore: SessionStore?
     private let wiredMemory: WiredMemoryCoordinator?
+    private var pendingLoadBytes: Int64 = 0
 
     public init(
         stateStore: StateStore? = nil,
@@ -158,16 +159,11 @@ public actor ModelRegistry {
         let estimateStart = Date()
         let neededBytes = RamBudget.estimate(modelId: id) ?? 0
         Self.dbg("estimate done id=\(id) bytes=\(neededBytes) took=\(Date().timeIntervalSince(estimateStart))s")
-        let usedBytes = usedRamBytes()
-        let ceiling = RamBudget.ceilingBytes()
-
-        if neededBytes > 0, ceiling > 0, usedBytes + neededBytes > ceiling {
-            throw LoadError.insufficientMemory(
-                neededBytes: neededBytes,
-                availableBytes: max(0, ceiling - usedBytes),
-                ceilingBytes: ceiling,
-                currentlyLoaded: loadedModelIds + embedderEntries.keys.sorted() + draftEntries.keys.sorted()
-            )
+        var reservedBudget = try reservePendingLoadBudget(neededBytes: neededBytes)
+        defer {
+            if reservedBudget {
+                releasePendingLoadBudget(neededBytes)
+            }
         }
 
         Self.dbg("before await ModelLoader.load id=\(id)")
@@ -189,6 +185,10 @@ public actor ModelRegistry {
             mtpCompatibility: Self.mtpCompatibility(for: id, isDraft: false)
         )
         entries[id] = loaded
+        if reservedBudget {
+            releasePendingLoadBudget(neededBytes)
+            reservedBudget = false
+        }
         Self.dbg("entries updated id=\(id)")
         if neededBytes > 0 {
             await wiredMemory?.reserveModel(id, weightBytes: Int(neededBytes))
@@ -205,16 +205,11 @@ public actor ModelRegistry {
             return existing.container
         }
         let neededBytes = RamBudget.estimate(modelId: id) ?? 0
-        let usedBytes = usedRamBytes()
-        let ceiling = RamBudget.ceilingBytes()
-
-        if neededBytes > 0, ceiling > 0, usedBytes + neededBytes > ceiling {
-            throw LoadError.insufficientMemory(
-                neededBytes: neededBytes,
-                availableBytes: max(0, ceiling - usedBytes),
-                ceilingBytes: ceiling,
-                currentlyLoaded: loadedModelIds + embedderEntries.keys.sorted() + draftEntries.keys.sorted()
-            )
+        var reservedBudget = try reservePendingLoadBudget(neededBytes: neededBytes)
+        defer {
+            if reservedBudget {
+                releasePendingLoadBudget(neededBytes)
+            }
         }
 
         let container: EmbedderModelContainer
@@ -229,6 +224,10 @@ public actor ModelRegistry {
             loadedAt: Date(),
             ramEstimateBytes: neededBytes
         )
+        if reservedBudget {
+            releasePendingLoadBudget(neededBytes)
+            reservedBudget = false
+        }
         if neededBytes > 0 {
             await wiredMemory?.reserveModel(id, weightBytes: Int(neededBytes))
         }
@@ -271,15 +270,11 @@ public actor ModelRegistry {
             throw LoadError.loadFailed(underlying: compatibility.rejectedMessage(modelId: draftId))
         }
         let neededBytes = RamBudget.estimate(modelId: draftId) ?? 0
-        let usedBytes = usedRamBytes()
-        let ceiling = RamBudget.ceilingBytes()
-        if neededBytes > 0, ceiling > 0, usedBytes + neededBytes > ceiling {
-            throw LoadError.insufficientMemory(
-                neededBytes: neededBytes,
-                availableBytes: max(0, ceiling - usedBytes),
-                ceilingBytes: ceiling,
-                currentlyLoaded: loadedModelIds + draftEntries.keys.sorted()
-            )
+        var reservedBudget = try reservePendingLoadBudget(neededBytes: neededBytes)
+        defer {
+            if reservedBudget {
+                releasePendingLoadBudget(neededBytes)
+            }
         }
         let model: MTPModelLoader.LoadedDraftModel
         do {
@@ -292,6 +287,10 @@ public actor ModelRegistry {
             loadedAt: Date(), ramEstimateBytes: neededBytes,
             mtpCompatibility: compatibility
         )
+        if reservedBudget {
+            releasePendingLoadBudget(neededBytes)
+            reservedBudget = false
+        }
         pairing[mainId] = draftId
         if neededBytes > 0 {
             await wiredMemory?.reserveModel(draftId, weightBytes: Int(neededBytes))
@@ -314,6 +313,35 @@ public actor ModelRegistry {
     private static func dbg(_ msg: String) {
         guard loadDebugEnabled else { return }
         FileHandle.standardError.write(Data("[telemak.mrl] \(msg)\n".utf8))
+    }
+
+    private func reservePendingLoadBudget(neededBytes: Int64) throws -> Bool {
+        guard neededBytes > 0 else { return false }
+        let ceiling = RamBudget.ceilingBytes()
+        guard ceiling > 0 else { return false }
+
+        let committedBytes = usedRamBytes()
+        let availableBytes = max(0, ceiling - committedBytes - pendingLoadBytes)
+        if neededBytes > availableBytes {
+            throw LoadError.insufficientMemory(
+                neededBytes: neededBytes,
+                availableBytes: availableBytes,
+                ceilingBytes: ceiling,
+                currentlyLoaded: allLoadedIds()
+            )
+        }
+
+        pendingLoadBytes += neededBytes
+        return true
+    }
+
+    private func releasePendingLoadBudget(_ bytes: Int64) {
+        guard bytes > 0 else { return }
+        pendingLoadBytes = max(0, pendingLoadBytes - bytes)
+    }
+
+    private func allLoadedIds() -> [String] {
+        loadedModelIds + embedderEntries.keys.sorted() + draftEntries.keys.sorted()
     }
 
     private static func mtpCompatibility(for id: String, isDraft: Bool) -> MTPCompatibility {
