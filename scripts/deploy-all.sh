@@ -184,8 +184,8 @@ smoke_one() {
   api_key="$(ssh -n -o BatchMode=yes "$ssh_target" \
     'cat ~/telemak/api-key.txt 2>/dev/null || echo ""' 2>/dev/null || echo "")"
 
-  # The server now binds 127.0.0.1 by default, so curl must run on the
-  # remote host via SSH rather than connecting from the deploy machine.
+  # Smoke from the remote host so the same path works whether the server
+  # is bound on 0.0.0.0 for LAN traffic or loopback during local dev.
   health_cmd="curl -fsS --max-time 5 http://127.0.0.1:${port}/health"
   if [ -n "$api_key" ]; then
     activity_cmd="curl -fsS --max-time 5 -H \"Authorization: Bearer ${api_key}\" http://127.0.0.1:${port}/admin/activity"

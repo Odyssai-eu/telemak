@@ -14,8 +14,8 @@ struct Serve: AsyncParsableCommand {
     @Option(name: .shortAndLong, help: "Port to bind to (default 8002).")
     var port: Int = 8002
 
-    @Option(name: .long, help: "Host to bind to (default 127.0.0.1).")
-    var host: String = "127.0.0.1"
+    @Option(name: .long, help: "Host to bind to (default 0.0.0.0).")
+    var host: String = "0.0.0.0"
 
     @Option(name: .long, help: "Override HF_HUB_CACHE for model downloads/lookups.")
     var hfHubCache: String?

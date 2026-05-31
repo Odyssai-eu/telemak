@@ -148,9 +148,17 @@ REMOTE
 HEALTH=""
 ACTIVITY=""
 TRIES=0
+API_KEY="$(ssh -n -o BatchMode=yes "$SSH_TARGET" \
+  'cat ~/telemak/api-key.txt 2>/dev/null || echo ""' 2>/dev/null || echo "")"
+HEALTH_CMD="curl -fsS --max-time 5 http://127.0.0.1:$PORT/health"
+if [ -n "$API_KEY" ]; then
+  ACTIVITY_CMD="curl -fsS --max-time 5 -H \"Authorization: Bearer $API_KEY\" http://127.0.0.1:$PORT/admin/activity"
+else
+  ACTIVITY_CMD="curl -fsS --max-time 5 http://127.0.0.1:$PORT/admin/activity"
+fi
 while [ "$TRIES" -lt 15 ]; do
-  if HEALTH="$(curl -fsS --max-time 5 "http://$IP:$PORT/health" 2>/dev/null)" \
-    && ACTIVITY="$(curl -fsS --max-time 5 "http://$IP:$PORT/admin/activity" 2>/dev/null)"; then
+  if HEALTH="$(ssh -n -o BatchMode=yes "$SSH_TARGET" "$HEALTH_CMD" 2>/dev/null)" \
+    && ACTIVITY="$(ssh -n -o BatchMode=yes "$SSH_TARGET" "$ACTIVITY_CMD" 2>/dev/null)"; then
     break
   fi
   TRIES=$((TRIES + 1))
