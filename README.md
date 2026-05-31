@@ -115,7 +115,7 @@ This is one-time per machine. The `telemak` CLI binary doesn't trip Gatekeeper (
 |---|---|---|
 | `TELEMAK_MODELS_DIR` | Odysseus-style models directory (`<root>/<org>/<name>/snapshots/<hash>/`) | unset → HF cache only |
 | `HF_HUB_CACHE` | HuggingFace cache path | `~/.cache/huggingface/hub/` |
-| `TELEMAK_API_KEY` | Optional bearer token; when set, all endpoints except `/health` and `/.well-known/` require `Authorization: Bearer <key>` | unset → open |
+| `TELEMAK_API_KEY` | Optional bearer token for `/admin/*`; inference endpoints stay open for LAN routing | unset → open |
 | `TELEMAK_CORS_ORIGIN` | `Access-Control-Allow-Origin` value | `*` |
 | `TELEMAK_MAX_SESSIONS` | Max KV-cached sessions in memory | `32` |
 | `TELEMAK_LOG_LEVEL` | `trace`, `debug`, `info`, `notice`, `warning`, `error`, `critical` | `info` |

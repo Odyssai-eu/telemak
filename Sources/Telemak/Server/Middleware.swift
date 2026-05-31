@@ -38,17 +38,16 @@ struct CORSMiddleware<Context: RequestContext>: RouterMiddleware {
     }
 }
 
-/// Optional bearer-token auth. Enforced only when `TELEMAK_API_KEY` env var
-/// is set. The healthcheck and `.well-known` endpoints are always open so
-/// orchestrators (Odysseus health probes, capability discovery) can poll
-/// without a key.
+/// Optional bearer-token auth for operator endpoints. Telemak is LAN-first:
+/// inference endpoints stay reachable by Odysseus on the local network, while
+/// `/admin/*` can be hardened by setting `TELEMAK_API_KEY`.
 struct BearerAuthMiddleware<Context: RequestContext>: RouterMiddleware {
     let expectedKey: String?
-    let openPathPrefixes: [String]
+    let protectedPathPrefixes: [String]
 
-    init(expectedKey: String? = nil, openPathPrefixes: [String] = ["/health", "/.well-known/"]) {
+    init(expectedKey: String? = nil, protectedPathPrefixes: [String] = ["/admin/"]) {
         self.expectedKey = expectedKey ?? ProcessInfo.processInfo.environment["TELEMAK_API_KEY"]
-        self.openPathPrefixes = openPathPrefixes
+        self.protectedPathPrefixes = protectedPathPrefixes
     }
 
     func handle(_ request: Request, context: Context, next: (Request, Context) async throws -> Response) async throws -> Response {
@@ -57,7 +56,11 @@ struct BearerAuthMiddleware<Context: RequestContext>: RouterMiddleware {
         }
 
         let path = request.uri.path
-        if openPathPrefixes.contains(where: { path == $0 || path.hasPrefix($0) }) {
+        let isProtected = protectedPathPrefixes.contains { prefix in
+            let normalized = prefix.hasSuffix("/") ? String(prefix.dropLast()) : prefix
+            return path == normalized || path.hasPrefix(prefix)
+        }
+        if !isProtected {
             return try await next(request, context)
         }
 

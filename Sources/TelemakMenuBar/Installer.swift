@@ -235,14 +235,26 @@ enum TelemakInstaller {
             throw InstallerError.missingResource("mlx-swift_Cmlx.bundle")
         }
 
-        // Generate a random bearer token and persist it at 0600 so the
-        // menu-bar app and remote clients can read it. A fresh token is
-        // written on every (re)install — rotate by reinstalling.
-        let apiKey = UUID().uuidString
         let apiKeyFile = telemakRoot.appendingPathComponent("api-key.txt")
-        try apiKey.write(to: apiKeyFile, atomically: true, encoding: .utf8)
-        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: apiKeyFile.path)
-        log.append("Wrote API key to \(apiKeyFile.path) (0600)")
+        let apiKey: String?
+        if fm.fileExists(atPath: apiKeyFile.path) {
+            apiKey = try String(contentsOf: apiKeyFile, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: apiKeyFile.path)
+            log.append("Using existing admin API key from \(apiKeyFile.path) (0600)")
+        } else {
+            apiKey = nil
+            log.append("No admin API key configured; /admin/* remains open on the LAN")
+        }
+
+        var serverEnvironment = [
+            "PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            "TELEMAK_MODELS_DIR": modelsDir.path,
+            "TELEMAK_LOG_LEVEL": "info",
+        ]
+        if let apiKey, !apiKey.isEmpty {
+            serverEnvironment["TELEMAK_API_KEY"] = apiKey
+        }
 
         let appExecutable = Bundle.main.executableURL?.path ?? "/Applications/Telemak.app/Contents/MacOS/Telemak"
         try writeLaunchAgent(
@@ -257,12 +269,7 @@ enum TelemakInstaller {
                 "8003",
             ],
             workingDirectory: telemakRoot.path,
-            environment: [
-                "PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-                "TELEMAK_MODELS_DIR": modelsDir.path,
-                "TELEMAK_LOG_LEVEL": "info",
-                "TELEMAK_API_KEY": apiKey,
-            ],
+            environment: serverEnvironment,
             stdout: telemakRoot.appendingPathComponent("launchd.out").path,
             stderr: telemakRoot.appendingPathComponent("launchd.err").path
         )

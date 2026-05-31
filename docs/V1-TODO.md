@@ -122,7 +122,7 @@ items marqués `[ODYSSEUS]` ci-dessous. Tout le reste est Telemak-only.
 
 - **v1.22** CORS headers : `Access-Control-Allow-Origin: *` (config `TELEMAK_CORS_ORIGIN` env var pour override), `Allow-Methods: GET,POST,OPTIONS`, `Allow-Headers: Content-Type, Authorization, X-Session-Id`. Handler OPTIONS pour le preflight.
 - **v1.23** Logging : remplacer `print` par `swift-log`. Output JSON-formatted, niveau configurable via `TELEMAK_LOG_LEVEL`. Rotating file handler avec daily rotation, max 7 files, à `~/.telemak/logs/telemak-YYYY-MM-DD.log`.
-- **v1.24** Optional API key auth : si `TELEMAK_API_KEY` env var est set → exiger header `Authorization: Bearer <key>` sur tous les endpoints sauf `/health` et `/.well-known/*`. Sinon → open (current behavior, LAN-trusted install).
+- **v1.24** Optional admin API key auth : si `TELEMAK_API_KEY` env var est set → exiger header `Authorization: Bearer <key>` sur `/admin/*`. Les endpoints d'inférence restent ouverts pour le routage LAN Odysseus. Sinon → open (current behavior, LAN-trusted install).
 - **v1.25** CLI subcommands :
   - `telemak models` : liste local cache + TELEMAK_MODELS_DIR (réutilise logique de `/admin/models/available`)
   - `telemak load <id>` : load via HTTP (assume `serve` is running) ou direct si standalone
