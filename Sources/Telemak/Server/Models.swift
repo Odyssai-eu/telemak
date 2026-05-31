@@ -307,7 +307,7 @@ struct ModelsHandler: Sendable {
             }
             let outputPath = URL(fileURLWithPath: out).standardized.path
             let contained = rootPaths.contains { root in
-                outputPath == root || outputPath.hasPrefix(root + "/")
+                ModelLoader.isPath(outputPath, sameOrDescendantOf: root)
             }
             if !contained {
                 return jsonError(.badRequest, code: "invalid_request_error",

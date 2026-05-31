@@ -57,7 +57,7 @@ public enum ModelLoader {
 
         let modelPath = URL(fileURLWithPath: trimmed).standardized.path
         let rootPath = URL(fileURLWithPath: modelsDir).standardized.path
-        guard modelPath == rootPath || modelPath.hasPrefix(rootPath + "/") else {
+        guard isPath(modelPath, sameOrDescendantOf: rootPath) else {
             return trimmed
         }
 
@@ -74,7 +74,7 @@ public enum ModelLoader {
         let candidateRoot = URL(fileURLWithPath: (modelsDir as NSString).appendingPathComponent(candidate))
             .standardized.path
         let resolvedPath = resolved.standardized.path
-        if modelPath == candidateRoot || modelPath == resolvedPath || modelPath.hasPrefix(candidateRoot + "/") {
+        if pathsMatch(modelPath, resolvedPath) || isPath(modelPath, sameOrDescendantOf: candidateRoot) {
             return candidate
         }
         return trimmed
@@ -92,7 +92,7 @@ public enum ModelLoader {
             if let modelsDir = ProcessInfo.processInfo.environment["TELEMAK_MODELS_DIR"] {
                 let rootPath = URL(fileURLWithPath: modelsDir).standardized.path
                 let modelPath = URL(fileURLWithPath: identifier).standardized.path
-                guard modelPath == rootPath || modelPath.hasPrefix(rootPath + "/") else {
+                guard isPath(modelPath, sameOrDescendantOf: rootPath) else {
                     throw PathOutsideModelsDir(identifier)
                 }
             }
@@ -380,6 +380,24 @@ public enum ModelLoader {
         var isDir: ObjCBool = false
         let configPath = (directory as NSString).appendingPathComponent("config.json")
         return FileManager.default.fileExists(atPath: configPath, isDirectory: &isDir) && !isDir.boolValue
+    }
+
+    static func isPath(_ path: String, sameOrDescendantOf root: String) -> Bool {
+        let normalizedPath = comparablePath(path)
+        let normalizedRoot = comparablePath(root)
+        return normalizedPath == normalizedRoot || normalizedPath.hasPrefix(normalizedRoot + "/")
+    }
+
+    private static func pathsMatch(_ lhs: String, _ rhs: String) -> Bool {
+        comparablePath(lhs) == comparablePath(rhs)
+    }
+
+    private static func comparablePath(_ path: String) -> String {
+        URL(fileURLWithPath: path)
+            .standardized
+            .path
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            .lowercased()
     }
 
     static func resolvedModelDirectory(for identifier: String) -> URL? {
