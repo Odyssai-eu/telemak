@@ -25,10 +25,9 @@ struct TelemakMenuBarApp: App {
         MenuBarExtra {
             MenuBarPopover(poller: poller, settings: settings)
         } label: {
-            // Status icon: filled circle when up, dotted when down. Inherits
-            // the menu-bar's dynamic color (so it adapts to light/dark mode).
             HStack(spacing: 4) {
-                Image(systemName: poller.isUp ? "circle.fill" : "circle.dotted")
+                TelemakStatusIcon(isUp: poller.isUp)
+                    .frame(width: 16, height: 16)
                 Text(telemakVersion)
             }
         }
@@ -40,6 +39,78 @@ struct TelemakMenuBarApp: App {
                 .frame(width: 440, height: 220)
         }
         .windowResizability(.contentSize)
+    }
+}
+
+private struct TelemakStatusIcon: View {
+    let isUp: Bool
+
+    var body: some View {
+        TelemakGlyph()
+            .fill(.primary)
+            .opacity(isUp ? 1.0 : 0.38)
+            .accessibilityLabel(isUp ? "Telemak running" : "Telemak unreachable")
+    }
+}
+
+private struct TelemakGlyph: Shape {
+    func path(in rect: CGRect) -> Path {
+        let scale = min(rect.width, rect.height) / 24.0
+        let xOffset = rect.midX - 12.0 * scale
+        let yOffset = rect.midY - 12.0 * scale
+
+        func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+            CGPoint(x: xOffset + x * scale, y: yOffset + y * scale)
+        }
+
+        func scaledRect(x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat) -> CGRect {
+            CGRect(
+                x: xOffset + x * scale,
+                y: yOffset + y * scale,
+                width: width * scale,
+                height: height * scale
+            )
+        }
+
+        var path = Path()
+
+        path.move(to: point(19.94, 14.24))
+        [
+            (18.18, 14.24), (18.18, 12.36), (18.18, 10.49), (19.94, 10.49),
+            (19.94, 8.61), (19.94, 6.74), (18.18, 6.74), (18.18, 4.86),
+            (16.41, 4.86), (16.41, 2.99), (14.65, 2.99), (14.65, 1.11),
+            (12.88, 1.11), (12.88, 2.99), (12.88, 4.86), (12.88, 4.86),
+            (12.88, 2.99), (12.88, 1.11), (11.12, 1.11), (11.12, 2.99),
+            (11.12, 4.86), (11.12, 4.86), (11.12, 2.99), (11.12, 1.11),
+            (9.35, 1.11), (9.35, 2.99), (7.59, 2.99), (7.59, 4.86),
+            (5.82, 4.86), (5.82, 6.74), (4.06, 6.74), (4.06, 8.61),
+            (4.06, 10.49), (5.82, 10.49), (5.82, 12.36), (5.82, 14.24),
+            (4.06, 14.24), (3.94, 14.24), (3.94, 16.11), (4.06, 16.11),
+            (5.82, 16.11), (7.59, 16.11), (7.59, 14.24), (7.59, 8.53),
+            (9.35, 8.53), (11.12, 8.53), (12.88, 8.53), (14.65, 8.53),
+            (16.41, 8.53), (16.41, 14.24), (16.41, 16.11), (18.18, 16.11),
+            (19.94, 16.11), (20.23, 16.11), (20.23, 14.24), (19.94, 14.24),
+        ].forEach { path.addLine(to: point($0.0, $0.1)) }
+        path.closeSubpath()
+
+        [
+            (5.84, 16.11, 1.76, 1.88),
+            (9.34, 19.48, 1.76, 1.88),
+            (7.60, 17.75, 1.76, 1.88),
+            (11.12, 21.36, 1.76, 1.88),
+            (16.45, 16.11, 1.76, 1.88),
+            (12.89, 19.48, 1.76, 1.88),
+            (14.69, 17.69, 1.76, 1.88),
+            (11.12, 12.29, 1.76, 1.88),
+            (11.12, 14.14, 1.76, 1.88),
+            (11.12, 17.69, 1.76, 1.88),
+            (14.69, 16.11, 1.76, 1.88),
+            (7.60, 16.11, 1.76, 1.88),
+            (8.49, 10.41, 1.76, 1.88),
+            (13.80, 10.41, 1.76, 1.88),
+        ].forEach { path.addRect(scaledRect(x: $0.0, y: $0.1, width: $0.2, height: $0.3)) }
+
+        return path
     }
 }
 
