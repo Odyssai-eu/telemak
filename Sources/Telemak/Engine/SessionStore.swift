@@ -16,6 +16,7 @@ public actor SessionStore {
     public struct Entry: Sendable {
         public let sessionId: String
         public let modelId: String
+        public let cacheScope: String
         public let cacheURL: URL
         public var lastUsed: Date
         public var byteSize: Int64
@@ -80,13 +81,13 @@ public actor SessionStore {
 
     // MARK: - Hit / miss
 
-    /// Return the cache URL for `(sessionId, modelId)` if present. If a
-    /// session is found but the model differs (operator loaded a new model
-    /// for this id), the old cache is dropped and `nil` is returned —
-    /// caller should run full prefill.
-    public func hit(sessionId: String, modelId: String) async -> URL? {
+    /// Return the cache URL for `(sessionId, modelId, cacheScope)` if present.
+    /// If a session is found but the model or prompt-template context differs,
+    /// the old cache is dropped and `nil` is returned — caller should run full
+    /// prefill.
+    public func hit(sessionId: String, modelId: String, cacheScope: String = "") async -> URL? {
         guard let entry = entries[sessionId] else { return nil }
-        if entry.modelId != modelId {
+        if entry.modelId != modelId || entry.cacheScope != cacheScope {
             removeFile(at: entry.cacheURL)
             entries.removeValue(forKey: sessionId)
             return nil
@@ -99,6 +100,7 @@ public actor SessionStore {
     public func update(
         sessionId: String,
         modelId: String,
+        cacheScope: String = "",
         cacheURL: URL,
         byteSize: Int64
     ) async {
@@ -111,6 +113,7 @@ public actor SessionStore {
         entries[sessionId] = Entry(
             sessionId: sessionId,
             modelId: modelId,
+            cacheScope: cacheScope,
             cacheURL: cacheURL,
             lastUsed: now,
             byteSize: byteSize

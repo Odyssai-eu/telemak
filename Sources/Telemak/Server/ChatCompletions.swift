@@ -79,6 +79,7 @@ struct ChatCompletionsHandler: Sendable {
             templateContext["reasoning_effort"] = reasoningEffort
         }
         let additionalContext: [String: any Sendable]? = templateContext.isEmpty ? nil : templateContext
+        let sessionCacheScope = Self.sessionCacheScope(additionalContext)
 
         let instructions = payload.system ?? extractSystem(from: payload.messages)
         let userPrompt = renderUserPrompt(from: payload.messages)
@@ -115,7 +116,11 @@ struct ChatCompletionsHandler: Sendable {
         let sessionId = payload.sessionId ?? request.headers[.init("X-Session-Id")!]
         let cacheHit: URL? = await {
             guard let sessionId, let sessionStore else { return nil }
-            return await sessionStore.hit(sessionId: sessionId, modelId: modelId)
+            return await sessionStore.hit(
+                sessionId: sessionId,
+                modelId: modelId,
+                cacheScope: sessionCacheScope
+            )
         }()
         let promptForGeneration: String = (cacheHit != nil) ? lastUserMessageOnly(payload.messages) : userPrompt
         let effectiveInstructions: String? = (cacheHit != nil) ? nil : instructions
@@ -162,6 +167,7 @@ struct ChatCompletionsHandler: Sendable {
                 modelId: modelId,
                 sessionId: sessionId,
                 cacheHit: cacheHit,
+                sessionCacheScope: sessionCacheScope,
                 stopSequences: stopSequences,
                 images: imageBatch,
                 toolSpecs: toolSpecs,
@@ -259,6 +265,7 @@ struct ChatCompletionsHandler: Sendable {
                 session: session,
                 sessionId: sessionId,
                 modelId: modelId,
+                cacheScope: sessionCacheScope,
                 sessionStore: sessionStore
             )
         }
@@ -447,6 +454,7 @@ struct ChatCompletionsHandler: Sendable {
         modelId: String,
         sessionId: String?,
         cacheHit: URL?,
+        sessionCacheScope: String,
         stopSequences: [String],
         images: VisionImageBatch,
         toolSpecs: [[String: any Sendable]]?,
@@ -637,11 +645,12 @@ struct ChatCompletionsHandler: Sendable {
 
             if let sessionId, let sessionStore {
                 await saveSessionCache(
-                    session: session,
-                    sessionId: sessionId,
-                    modelId: modelId,
-                    sessionStore: sessionStore
-                )
+                        session: session,
+                        sessionId: sessionId,
+                        modelId: modelId,
+                        cacheScope: sessionCacheScope,
+                        sessionStore: sessionStore
+                    )
             }
 
             try await writer.finish(nil)
@@ -841,6 +850,7 @@ struct ChatCompletionsHandler: Sendable {
         session: ChatSession,
         sessionId: String,
         modelId: String,
+        cacheScope: String,
         sessionStore: SessionStore
     ) async {
         let url = await sessionStore.nextCacheURL(for: sessionId)
@@ -850,6 +860,7 @@ struct ChatCompletionsHandler: Sendable {
             await sessionStore.update(
                 sessionId: sessionId,
                 modelId: modelId,
+                cacheScope: cacheScope,
                 cacheURL: url,
                 byteSize: size
             )
@@ -863,6 +874,14 @@ struct ChatCompletionsHandler: Sendable {
             FileHandle.standardError.write(Data("[telemak.kv] saveCache failed for session \(sessionId): \(error)\n".utf8))
             try? FileManager.default.removeItem(at: url)
         }
+    }
+
+    private static func sessionCacheScope(_ context: [String: any Sendable]?) -> String {
+        guard let context, !context.isEmpty else { return "" }
+        return context.keys.sorted().map { key in
+            let value = context[key].map { "\($0)" } ?? ""
+            return "\(key)=\(value)"
+        }.joined(separator: ";")
     }
 
     /// Run `body` under a wired-memory active ticket when a coordinator is
