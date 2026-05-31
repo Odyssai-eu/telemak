@@ -81,7 +81,11 @@ struct ChatCompletionsHandler: Sendable {
         let additionalContext: [String: any Sendable]? = templateContext.isEmpty ? nil : templateContext
         let sessionCacheScope = Self.sessionCacheScope(additionalContext)
 
-        let instructions = payload.system ?? extractSystem(from: payload.messages)
+        let instructions = Self.instructionsWithReasoningGuard(
+            base: payload.system ?? extractSystem(from: payload.messages),
+            modelId: modelId,
+            effort: payload.reasoningEffort
+        )
         let userPrompt = renderUserPrompt(from: payload.messages)
         if userPrompt.isEmpty {
             return jsonError(.badRequest, code: "invalid_request_error",
@@ -1104,6 +1108,34 @@ struct ChatCompletionsHandler: Sendable {
     private func extractSystem(from messages: [ChatMessage]) -> String? {
         let systemParts = messages.filter { $0.role == "system" }.compactMap { $0.content?.asPlainText }
         return systemParts.isEmpty ? nil : systemParts.joined(separator: "\n\n")
+    }
+
+    private static func instructionsWithReasoningGuard(
+        base: String?,
+        modelId: String,
+        effort: String?
+    ) -> String? {
+        let model = modelId.lowercased()
+        guard model.contains("step-3.7") || model.contains("step3p7") else {
+            return base
+        }
+        guard let effort = effort?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
+            return base
+        }
+
+        let guardrail: String? = switch effort {
+        case "minimal":
+            "Keep reasoning extremely brief. Close </think> within 80 tokens, then write the requested answer."
+        case "low":
+            "Keep reasoning brief. Close </think> within 200 tokens, then write the requested answer."
+        default:
+            nil
+        }
+        guard let guardrail else { return base }
+        guard let base, !base.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return guardrail
+        }
+        return "\(guardrail)\n\n\(base)"
     }
 
     private func renderUserPrompt(from messages: [ChatMessage]) -> String {
