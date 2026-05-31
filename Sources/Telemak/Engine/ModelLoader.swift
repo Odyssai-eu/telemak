@@ -144,6 +144,12 @@ public enum ModelLoader {
            let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         {
             let modelType = (root["model_type"] as? String) ?? ""
+            if modelType == "step3p7" || modelType == "step3p5" {
+                return try await LLMModelFactory.shared.loadContainer(
+                    from: prepared,
+                    using: #huggingFaceTokenizerLoader()
+                )
+            }
             let visionConfig = root["vision_config"] as? [String: Any]
             let isVisionEmpty = visionConfig == nil || (visionConfig?.isEmpty ?? true)
             let isQwen35 = modelType == "qwen3_5" || modelType == "qwen3_5_moe"
@@ -322,11 +328,15 @@ public enum ModelLoader {
               let root = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? [String: Any]
         else { return false }
 
+        let modelType = (root["model_type"] as? String ?? "").lowercased()
+        if modelType == "step3p7" || modelType == "step3p5" {
+            // Telemak currently supports Step-3.7 as a text-only LLM even
+            // though the upstream checkpoint is a VLM wrapper.
+            return false
+        }
         if let visionConfig = root["vision_config"] as? [String: Any], !visionConfig.isEmpty {
             return true
         }
-
-        let modelType = (root["model_type"] as? String ?? "").lowercased()
         let knownVLMTypes: Set<String> = [
             "paligemma", "qwen2_vl", "qwen2_5_vl", "qwen3_vl", "idefics3",
             "gemma4", "smolvlm", "fastvlm", "llava_qwen2", "pixtral",
@@ -345,11 +355,14 @@ public enum ModelLoader {
     }
 
     private static func isVisionModel(root: [String: Any]) -> Bool {
+        let modelType = (root["model_type"] as? String ?? "").lowercased()
+        if modelType == "step3p7" || modelType == "step3p5" {
+            // Text-only Step-3.7 support is routed through MLXLLM.
+            return false
+        }
         if let visionConfig = root["vision_config"] as? [String: Any], !visionConfig.isEmpty {
             return true
         }
-
-        let modelType = (root["model_type"] as? String ?? "").lowercased()
         let knownVLMTypes: Set<String> = [
             "paligemma", "qwen2_vl", "qwen2_5_vl", "qwen3_vl", "idefics3",
             "gemma4", "smolvlm", "fastvlm", "llava_qwen2", "pixtral",
