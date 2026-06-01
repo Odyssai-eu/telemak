@@ -35,6 +35,24 @@ Smoke checks:
 
 If the canary fails, no other host is touched.
 
+## Doctor
+
+Run diagnostics against one host:
+
+```bash
+scripts/doctor-host.sh node-a
+```
+
+Run diagnostics against the full local inventory:
+
+```bash
+scripts/doctor-host.sh --all
+```
+
+The doctor checks SSH, release artifacts, codesign authority, server and
+menubar LaunchAgents, `0.0.0.0` bind, `/health`, `/admin/activity`, and LAN
+reachability of `/v1/models` without a bearer token.
+
 ## Rollback One Host
 
 Rollback to the bronze baseline:

@@ -11,31 +11,67 @@ DERIVED="${ROOT}/.xcbuild"
 cd "$ROOT"
 
 LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/telemak-build.XXXXXX.log")"
-trap 'rm -f "$LOG_FILE"' EXIT
+KEEP_LOG=0
+trap 'if [ "$KEEP_LOG" != "1" ]; then rm -f "$LOG_FILE"; fi' EXIT
 
-if xcodebuild \
+xcodebuild \
   -scheme Telemak-Package \
   -configuration "$CONFIGURATION" \
   -derivedDataPath "$DERIVED" \
-  -destination 'platform=macOS' \
+  -sdk macosx \
+  -destination 'generic/platform=macOS' \
   -skipMacroValidation \
   ENABLE_CODE_COVERAGE=NO \
   SWIFT_ENABLE_CODE_COVERAGE=NO \
   CLANG_ENABLE_CODE_COVERAGE=NO \
   GCC_GENERATE_TEST_COVERAGE_FILES=NO \
   GCC_INSTRUMENT_PROGRAM_FLOW_ARCS=NO \
-  build >"$LOG_FILE" 2>&1; then
-  BUILD_STATUS=0
-else
-  BUILD_STATUS=$?
-fi
+  build >"$LOG_FILE" 2>&1 &
+BUILD_PID=$!
+BUILD_STATUS=""
+BUILD_TIMEOUT_SECONDS="${TELEMAK_BUILD_TIMEOUT_SECONDS:-900}"
+ELAPSED=0
 
-grep -vE '^(2026|note: |Note:|\s+[A-Z][a-z]+ \(in target)' "$LOG_FILE" || true
+while :; do
+  if grep -q '\*\* BUILD SUCCEEDED \*\*' "$LOG_FILE"; then
+    BUILD_STATUS=0
+    # Xcode 26 can leave xcodebuild stuck in an exiting state after a
+    # successful generic macOS build when output is redirected. Once the
+    # success marker is in the log, artifacts are already written.
+    kill "$BUILD_PID" 2>/dev/null || true
+    break
+  fi
+  if grep -q '\*\* BUILD FAILED \*\*' "$LOG_FILE"; then
+    if wait "$BUILD_PID"; then BUILD_STATUS=0; else BUILD_STATUS=$?; fi
+    [ "$BUILD_STATUS" -eq 0 ] && BUILD_STATUS=1
+    break
+  fi
+  if ! kill -0 "$BUILD_PID" 2>/dev/null; then
+    if wait "$BUILD_PID"; then BUILD_STATUS=0; else BUILD_STATUS=$?; fi
+    break
+  fi
+  if [ "$ELAPSED" -ge "$BUILD_TIMEOUT_SECONDS" ]; then
+    kill "$BUILD_PID" 2>/dev/null || true
+    BUILD_STATUS=124
+    break
+  fi
+  sleep 1
+  ELAPSED=$((ELAPSED + 1))
+done
 
 if [ "$BUILD_STATUS" -ne 0 ]; then
+  KEEP_LOG=1
   echo "✗ xcodebuild failed with status $BUILD_STATUS" >&2
+  grep -E '(^[[:alnum:]_./ -]+:[0-9]+:[0-9]+: (error|warning):|^error:|^warning:|^\*\* BUILD FAILED \*\*)' "$LOG_FILE" >&2 || true
+  echo "last diagnostics from $LOG_FILE (kept for inspection):" >&2
+  tail -n 80 "$LOG_FILE" >&2
   exit "$BUILD_STATUS"
 fi
+
+if grep -q 'CoreSimulator is out of date' "$LOG_FILE"; then
+  echo "⚠ CoreSimulator is out of date; ignored because build targets generic macOS"
+fi
+grep -E '(^[[:alnum:]_./ -]+:[0-9]+:[0-9]+: warning:|^warning:|^\*\* BUILD SUCCEEDED \*\*)' "$LOG_FILE" || true
 
 BINARY="$DERIVED/Build/Products/$CONFIGURATION/telemak"
 if [ -x "$BINARY" ]; then
