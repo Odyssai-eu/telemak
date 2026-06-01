@@ -13,7 +13,9 @@ fi
 
 cd "$ROOT"
 
-"$ROOT/scripts/build.sh" "$CONFIGURATION"
+if [ "${TELEMAK_PACKAGE_SKIP_BUILD:-0}" != "1" ]; then
+  "$ROOT/scripts/build.sh" "$CONFIGURATION"
+fi
 "$ROOT/scripts/build-menubar-app.sh" "$CONFIGURATION"
 
 APP="$DIST/Telemak.app"

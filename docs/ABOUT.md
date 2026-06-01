@@ -187,7 +187,7 @@ direct avec Claude Code, l'Anthropic SDK, Companion.
 
 ### Le déclencheur
 
-Sophie utilise Odysseus distribué (3-4 Mac Ultra) pour les modèles
+the operator utilise Odysseus distribué (3-4 Mac Ultra) pour les modèles
 ≥ 200 B. Mais pour les modèles courants 30-70 B — un Qwen3.6-35B-A3B,
 un Gemma 4 31 B, un Qwen3-Coder-Next — un seul Mac Studio M4 Max ou
 M3 Ultra suffit largement, et le surcoût d'Odysseus distribué n'a pas
@@ -254,10 +254,10 @@ Sur les hosts de production :
 
 | Modèle | Taille (9-bit MLX) | Wired |
 |---|---|---|
-| Gemma 4 26B-A4B 9-bit | ~30 GB | max-64 / ultra-96 |
-| Qwen3-Coder-Next 9-bit | ~60-90 GB selon build | ultra-96 / ultra-256 |
-| MiniMax-M2.7 8-bit | gros MoE | ultra-512 |
-| Mistral Medium 3.5 8/9-bit | gros dense/MoE | ultra-512 |
+| Gemma 4 26B-A4B 9-bit | ~30 GB | 64 GB node / 96 GB node |
+| Qwen3-Coder-Next 9-bit | ~60-90 GB selon build | 96 GB node / 256 GB node |
+| MiniMax-M2.7 8-bit | gros MoE | 512 GB node |
+| Mistral Medium 3.5 8/9-bit | gros dense/MoE | 512 GB node |
 | Embedder MLXEmbedders | petit modèle | co-chargeable |
 
 `/admin/load` charge LLM ou embedder selon la config. Le ceiling wired
@@ -379,7 +379,7 @@ Telemak contient du code de recherche MTP : loader draft, itérateurs Qwen
 
 Pourquoi :
 
-- Gemma 4 26B-A4B atteint déjà ~72 tok/s sans MTP sur max-64.
+- Gemma 4 26B-A4B atteint déjà ~72 tok/s sans MTP sur 64 GB node.
 - Le port Gemma/MTP a introduit des régressions de vitesse catastrophiques
   sur certains chemins de chargement.
 - Le gain attendu ne justifie pas le risque tant que Telemak doit rester
@@ -590,19 +590,15 @@ Companion.
 - **Version stable** : `0.6.15`
 - **Tag rollback** : `v0.6.15-stable`
 - **Bronze rollback** : `~/telemak/Release.bronze-0.6.15` sur les hosts
-- **Déploiements actifs** :
-  - `ultra-512` `.29` : `Release.deepseek`, port `8013`
-  - `ultra-256a` `.30` : port `8003`
-  - `ultra-256b` `.31` : port `8003`
-  - `ultra-256c` `.32` : port `8003`
-  - `ultra-96` `.49` : port `8003`
-  - `max-64` `.50` : port `8003`
+- **Déploiements actifs** : inventaire local opérateur dans
+  `scripts/telemak-hosts.local.sh` (gitignored). Le dépôt public ne shippe
+  que `scripts/telemak-hosts.example.sh`.
 
 ### Modèles testés récemment
 
-- **Gemma 4 26B-A4B 9-bit** : ~72 tok/s sans MTP sur max-64.
-- **Qwen3-Coder-Next 9-bit** : ~41 tok/s sur ultra-512, ~52 tok/s sur ultra-96.
-- **MiniMax-M2.7 8-bit** : ~33 tok/s end-to-end, decode ~43 tok/s sur ultra-512 après chunk coalescing.
+- **Gemma 4 26B-A4B 9-bit** : ~72 tok/s sans MTP sur 64 GB node.
+- **Qwen3-Coder-Next 9-bit** : ~41 tok/s sur 512 GB node, ~52 tok/s sur 96 GB node.
+- **MiniMax-M2.7 8-bit** : ~33 tok/s end-to-end, decode ~43 tok/s sur 512 GB node après chunk coalescing.
 - **Mistral Medium 3.5 8/9-bit** : charge, mais ~4 tok/s ; pas un bon fit Telemak aujourd'hui.
 - **DeepSeek V4 Flash/Pro** : non supporté côté Telemak Swift (`deepseek_v4` absent de `mlx-swift-lm`) ; réservé à un spike dédié.
 
@@ -636,7 +632,7 @@ Companion.
 
 - 📋 Finaliser l'installeur user-friendly : drag-and-drop vers `/Applications`,
   first-run install/update, LaunchAgents serveur + menu-bar.
-- 📋 Normaliser le menubar de `max-64` qui tourne encore via
+- 📋 Normaliser le menubar de `64 GB node` qui tourne encore via
   `/Applications/Telemak.app` hors LaunchAgent standard.
 - 📋 Durcir les health/activity smokes dans Odysseus et les scripts opérateur.
 - 📋 Garder un registre de compatibilité modèles : bons fits, lents, non supportés.
@@ -704,7 +700,7 @@ Les trois projets sont distincts mais conçus pour s'emboîter :
 - **State** : `~/.telemak/state.json` (modèles persistés)
 - **Endpoints exposés** : `/v1/chat/completions`, `/v1/messages`, `/v1/embeddings`, `/v1/models`, `/admin/*`, `/health`, `/.well-known/inference-engine.json`
 - **Build** : `./scripts/build.sh [Debug|Release]` (xcodebuild — Metal Toolchain requis)
-- **Deploy parc** : `scripts/deploy-all.sh --canary ultra-256a`
+- **Deploy parc** : `scripts/deploy-all.sh --canary node-a`
 - **Rollback host** : `scripts/rollback-host.sh <host> [bronze-0.6.15|prevN]`
 - **Container parent** : aucun — c'est ça l'intérêt
 - **Issues queue** : `gh issue list --repo Odyssai-eu/telemak --label ready`

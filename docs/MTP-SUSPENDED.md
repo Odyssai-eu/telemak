@@ -10,7 +10,7 @@ Stable baseline:
 
 Reason:
 
-- Gemma 4 26B-A4B already reaches about 72 tok/s without MTP on max-64.
+- Gemma 4 26B-A4B already reaches about 72 tok/s without MTP on 64 GB node.
 - The Gemma MoE loader port (`ea0758f`) made the model loadable but caused
   catastrophic generation speed regressions.
 - The expected MTP gain does not currently justify more implementation risk

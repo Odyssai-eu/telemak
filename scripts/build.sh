@@ -69,7 +69,7 @@ fi
 #      console user session for the trust mutation).
 #
 # CODESIGN_IDENTITY env var overrides which identity to use. Defaults
-# to "Telemak Developer (Odyssai-eu)" — the identity Sophie minted
+# to "Telemak Developer (Odyssai-eu)" — the identity the operator minted
 # 2026-05-24. Debug builds stay ad-hoc (fast inner loop, no perf
 # difference, TCC ad-hoc cdhash churn doesn't matter for dev).
 if [ "$CONFIGURATION" = "Release" ]; then

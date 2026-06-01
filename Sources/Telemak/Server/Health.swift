@@ -35,6 +35,8 @@ struct HealthHandler: Sendable {
             modelsLoaded: loadedModelIds,
             wiredMemoryUsedGB: usedGB,
             wiredMemoryFreeGB: wiredMemoryFreeGB(usedGB: usedGB),
+            wiredMemoryTotalGB: bytesToGB(RamBudget.totalRam()),
+            wiredMemoryCeilingGB: bytesToGB(RamBudget.ceilingBytes()),
             requestsServed: requestsServed,
             avgTokSRecent: avgTokPerSec
         )
@@ -64,6 +66,10 @@ struct HealthHandler: Sendable {
         let ret = sysctlbyname(name, &value, &size, nil, 0)
         return ret == 0 ? value : nil
     }
+
+    private func bytesToGB(_ bytes: Int64) -> Double {
+        Double(bytes) / 1_073_741_824.0
+    }
 }
 
 private struct HealthPayload: Codable {
@@ -73,6 +79,8 @@ private struct HealthPayload: Codable {
     let modelsLoaded: [String]
     let wiredMemoryUsedGB: Double
     let wiredMemoryFreeGB: Double
+    let wiredMemoryTotalGB: Double
+    let wiredMemoryCeilingGB: Double
     let requestsServed: Int
     let avgTokSRecent: Double?
 
@@ -83,6 +91,8 @@ private struct HealthPayload: Codable {
         case modelsLoaded = "models_loaded"
         case wiredMemoryUsedGB = "wired_memory_used_gb"
         case wiredMemoryFreeGB = "wired_memory_free_gb"
+        case wiredMemoryTotalGB = "wired_memory_total_gb"
+        case wiredMemoryCeilingGB = "wired_memory_ceiling_gb"
         case requestsServed = "requests_served"
         case avgTokSRecent = "avg_tok_s_recent"
     }

@@ -1,7 +1,7 @@
 # Telemak V1 — TODO
 
 > Runbook V1 pour Telemak. V0 (commit `55ec3f6` + post-V0 fixes) est shippé
-> et tourne en prod sur `192.168.86.50:8003` via LaunchAgent.
+> et tourne en prod sur `<telemak-host>:8003` via LaunchAgent.
 > Voir [`SESSION-2026-05-23-2000-telemak-mvp-v0.md`](SESSION-2026-05-23-2000-telemak-mvp-v0.md)
 > pour l'historique V0.
 >
@@ -13,7 +13,7 @@
 - `/v1/chat/completions` stream + non-stream
 - `/v1/models`, `/admin/load`, `/admin/unload`, `/health`
 - SSE usage chunk avant `[DONE]` (commit `2d3c926`)
-- Release build deployed sur max-64.lan via LaunchAgent (`eu.odyssai.telemak`)
+- Release build deployed sur <telemak-host>.local via LaunchAgent (`eu.odyssai.telemak`)
 - Integration Odysseus en first-class `kind: telemak` cluster (commits `518e2fa`, `687a137`, `edc64f6` côté Odysseus)
 - Filter `<think>` dans Odysseus proxy pour Qwen3.5/3.6 auto-open think models
 
@@ -26,7 +26,7 @@ bar `.app`, doc Gatekeeper.
 
 | # | Décision | Choix |
 |---|---|---|
-| D1 | Use case multi-modèle principal | Petits modèles + chat sur même Mac. Ex `max-64` : Qwen3.5-35B-A3B (chat) + Qwen3-Embedding-0.6B (embeddings) en parallèle. Sophie veut ce pattern explicitement. |
+| D1 | Use case multi-modèle principal | Petits modèles + chat sur même Mac. Ex `64 GB node` : Qwen3.5-35B-A3B (chat) + Qwen3-Embedding-0.6B (embeddings) en parallèle. the operator veut ce pattern explicitement. |
 | D2 | Eviction policy quand `load` dépasse RAM | **REFUSE** avec error explicite + memory breakdown. Pas d'auto-LRU. Opérateur unload explicitement ce qu'il veut libérer. Aligné avec la philo Odysseus "no auto-swap". |
 | D3 | `POST /admin/unload` sans `{model}` | **REFUSE 400** ("specify model id"). Pour unload all : `POST /admin/unload?all=true` avec confirmation explicite. |
 | D4 | Alias scheme dans Odysseus `/v1/models` | Quand 1 seul modèle chargé : `telemak-max64` (back-compat). Quand N modèles : émettre N entries `telemak-max64:<short-model-id>` (colon, URL-safe). L'alias `telemak-max64` seul disparaît dès qu'il y a N>1 modèles. |
@@ -146,7 +146,7 @@ items marqués `[ODYSSEUS]` ci-dessous. Tout le reste est Telemak-only.
 
 ## Done criteria V1 launch
 
-Telemak V1 est **done** quand, sur max-64.lan :
+Telemak V1 est **done** quand, sur <telemak-host>.local :
 
 1. `telemak serve` charge auto les modèles persistés au boot (5a)
 2. Deux modèles chargés simultanément (ex Qwen3.5-35B-A3B + Qwen3-Embedding-0.6B), visibles dans `/v1/models` (v1.5)
@@ -164,19 +164,19 @@ Telemak V1 est **done** quand, sur max-64.lan :
 
 ```bash
 # Build Release
-cd /Users/sophie/Claude/code/telemak && ./scripts/build.sh Release
+cd <repo-root> && ./scripts/build.sh Release
 
-# Deploy on max-64.lan
+# Deploy on <telemak-host>.local
 cd .xcbuild/Build/Products/Release && tar czf /tmp/telemak.tgz telemak mlx-swift_Cmlx.bundle
-scp /tmp/telemak.tgz admin@192.168.86.50:/tmp/
-ssh admin@192.168.86.50 'cd ~/telemak/Release && tar xzf /tmp/telemak.tgz && launchctl kickstart -k gui/$(id -u)/eu.odyssai.telemak'
+scp /tmp/telemak.tgz admin@<telemak-host>:/tmp/
+ssh admin@<telemak-host> 'cd ~/telemak/Release && tar xzf /tmp/telemak.tgz && launchctl kickstart -k gui/$(id -u)/eu.odyssai.telemak'
 
 # Verify
-curl http://192.168.86.50:8003/health
-curl http://192.168.86.50:8003/v1/models
+curl http://<telemak-host>:8003/health
+curl http://<telemak-host>:8003/v1/models
 
 # Smoke via Odysseus
-curl http://192.168.86.141:8000/v1/chat/completions -H 'Content-Type: application/json' \
+curl http://<odysseus-host>:8000/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model":"telemak-max64","messages":[{"role":"user","content":"hi"}],"stream":false,"max_tokens":50}'
 ```
 
@@ -184,5 +184,5 @@ curl http://192.168.86.141:8000/v1/chat/completions -H 'Content-Type: applicatio
 
 - Travailler sur `feat/v1-<block>` branches, PR vers main
 - Auto-mode classifier refuse `git push origin main` direct — c'est intentionnel
-- Sophie merge les PRs après review (ou si elle te dit `merge`)
+- the operator merge les PRs après review (ou si elle te dit `merge`)
 - Commits Conventional + HEREDOC + Co-Authored-By footer

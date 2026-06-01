@@ -13,7 +13,7 @@
 ## 0. What Telemak is, today
 
 Telemak is a **native macOS HTTP runtime for MLX inference, on one Mac**.
-Current version : **v0.2.0** (running in production on `max-64.lan` since
+Current version : **v0.2.0** (running in production on `<telemak-host>.local` since
 2026-05-23).
 
 - Single Swift package, two binaries : `telemak` (CLI server) and
@@ -24,7 +24,7 @@ Current version : **v0.2.0** (running in production on `max-64.lan` since
   `/v1/chat/completions`, `/v1/models`, `/admin/load`, `/admin/unload`,
   `/admin/api/global-settings`, `/health`, capability contract at
   `/.well-known/inference-engine.json`.
-- Built on the **`Odyssai-eu/mlx-swift-lm`** fork (Sophie's customised fork
+- Built on the **`Odyssai-eu/mlx-swift-lm`** fork (the operator's customised fork
   of `ml-explore/mlx-swift-lm`). The fork carries MTP / hidden-states work
   that upstream hasn't accepted yet.
 - Registered in Odysseus' `topology.yaml` as a `backend: http-proxy`
@@ -52,8 +52,8 @@ If a task drifts toward those, stop and re-read this section.
                                        ▼                              ▼
                               ┌──────────────────┐         ┌──────────────────────┐
                               │ Argo cluster     │         │ ~/.cache/huggingface │
-                              │ ultra-512 + 256× │         │ + ~/Library/...      │
-                              │ (.29-.32)         │         │                      │
+                              │ LAN node group   │         │ + ~/Library/...      │
+                              │ operator-owned   │         │                      │
                               └──────────────────┘         └──────────────────────┘
 ```
 
@@ -136,7 +136,7 @@ step.
 
 `Package.swift` pins **`Odyssai-eu/mlx-swift-lm` branch
 `feat/v2-mtp-hidden-states`**, not the upstream `ml-explore/mlx-swift-lm`.
-The fork lives at `~/Claude/code/mlx-swift-lm-odyssai/` on Sophie's
+The fork lives at `<mlx-swift-lm-fork>/` on the operator's
 workstation. It carries :
 
 - MTP speculative decoding scaffolding (the hidden-states surface needed
@@ -164,12 +164,12 @@ Telemak's only follow-up is bumping the commit pin in `Package.swift` and
 
 The plan is to consolidate `mlx-coder` (Python), `mlx-embed` (Python) and
 `mlx-vlm` (Python) onto Telemak, so a single Swift process owns local
-inference on max-64. Issues #37 and #36 track that.
+inference on 64 GB node. Issues #37 and #36 track that.
 
 ## 4. Deploy — how Telemak runs in production
 
-Production host : **`max-64.lan`** (192.168.86.50, M3 Max 64 GB). Currently
-also planned for `ultra-96a.lan` (192.168.86.49, M3 Ultra 96 GB) — issue
+Production host : **`<telemak-host>.local`** (<telemak-host>, M3 Max 64 GB). Currently
+also planned for `<telemak-host>.local` (<telemak-host>, M3 Ultra 96 GB) — issue
 #38 tracks turning the deploy into a one-click DMG installer.
 
 ### Layout on the host
@@ -281,7 +281,7 @@ no — provide options and guidance.**
 - ✅ `/admin/load` + `/admin/unload` runtime model swap.
 - ✅ Capability contract at `/.well-known/inference-engine.json` (used by
   Odysseus to negotiate features).
-- ✅ Codesigning + LaunchAgent on max-64 — service survives reboots.
+- ✅ Codesigning + LaunchAgent on 64 GB node — service survives reboots.
 - ✅ KV cache (per-conversation prefix reuse) — sessions stay warm across
   turns.
 - ✅ MTP V1 iterator (`MTPSpeculativeIterator.swift`) shipped in issue #29
@@ -389,7 +389,7 @@ The commit's `Difficulty: N delivered` line is what counts for velocity.
 After every deploy, run these against the live host :
 
 ```bash
-HOST=max-64.lan   # or ultra-96a.lan, or wherever you deployed
+HOST=<telemak-host>.local   # or <telemak-host>.local, or wherever you deployed
 
 # 1. Health
 curl -s http://$HOST:8003/health
@@ -412,7 +412,7 @@ curl -N -X POST http://$HOST:8003/v1/chat/completions \
   -d '{"model":"<loaded-id>","messages":[{"role":"user","content":"count to 5"}],"stream":true,"max_tokens":40}'
 
 # 6. Companion → Odysseus → Telemak round-trip (full integration smoke)
-# Sophie validates from the Companion UI ; mention it in your commit body.
+# the operator validates from the Companion UI ; mention it in your commit body.
 ```
 
 If any of these fail after your deploy, **revert the commit on main and
@@ -424,21 +424,21 @@ invariant must hold.
 Add the `needs-human` label and **stop** when :
 
 - An issue depends on a change in `mlx-swift-lm-odyssai` AND the fork
-  doesn't have an obvious bump path (e.g. needs Sophie's call on
+  doesn't have an obvious bump path (e.g. needs the operator's call on
   upstream rebase).
 - A model's chat template breaks `<|im_end|>` parsing or similar
-  template ambiguity — chat-template work is fiddly and Sophie wants
+  template ambiguity — chat-template work is fiddly and the operator wants
   to see those.
 - A change would alter the HTTP API surface (`/v1/chat/completions`
   shape) — Companion + Odysseus need to know.
 - A change would touch macOS TCC / codesigning / LaunchAgent setup —
   these are physical-presence-required changes on the host.
-- Two valid implementations exist and you can't tell which Sophie
+- Two valid implementations exist and you can't tell which the operator
   prefers.
 - Cost / runtime ceiling hit on a long-running task.
 
 Tag, comment with the specific question, stop. PO will pick it up and
-either resolve or dispatch to Sophie.
+either resolve or dispatch to the operator.
 
 ## 10. Cross-repo links — when something points elsewhere
 
@@ -448,10 +448,10 @@ either resolve or dispatch to Sophie.
 - **Companion** : `~/Claude/code/thecompai/app/` (private repo, currently
   `https://github.com/thecompai/app`). The chat UI. Read
   `server/routes/chat.ts` if you change how tools/reasoning interleave.
-- **mlx-swift-lm-odyssai** : `~/Claude/code/mlx-swift-lm-odyssai/` (fork
-  at `https://github.com/Odyssai-eu/mlx-swift-lm`). Sophie's fork of
+- **mlx-swift-lm-odyssai** : `<mlx-swift-lm-fork>/` (fork
+  at `https://github.com/Odyssai-eu/mlx-swift-lm`). the operator's fork of
   `ml-explore/mlx-swift-lm`. Issue #34 touches this fork, not Telemak.
-- **odyssai-services** : sibling cockpit container, `mini-i3:8001`. Hosts
+- **odyssai-services** : sibling cockpit container, `<odyssai-services-host>:8001`. Hosts
   the bench tool. Use it to measure tok/s changes after MTP work lands.
 - **Obsidian wiki** : `~/Claude/code/odyssai-wiki/` — cross-repo concept
   notes. Articles relevant to Telemak : `[[telemak-runtime]]`,
@@ -472,7 +472,7 @@ If you've never seen this repo before, do this in order :
 6. **Read the open `ready` issues** : `gh issue list --label ready` then
    `gh issue view <N>` for each.
 7. **Build locally** : `./scripts/build.sh Debug && .xcbuild/Build/Products/Debug/telemak --version`. Confirm `0.2.0` (or whatever the current source says).
-8. **Curl the live host** (`max-64.lan:8003`) — see §8 — confirm the
+8. **Curl the live host** (`<telemak-host>.local:8003`) — see §8 — confirm the
    prod runtime matches what you just built. If it doesn't, that's your
    first task : align deploy with main.
 
@@ -506,4 +506,4 @@ Difficulty: $N delivered.
 
 That seals the issue (which auto-closed via `Closes #N` on push). Move on
 to the next `ready` issue. If the backlog is empty, idle until the PO
-files more or Sophie dispatches something.
+files more or the operator dispatches something.

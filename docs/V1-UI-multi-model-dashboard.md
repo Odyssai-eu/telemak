@@ -3,7 +3,7 @@
 > Backend supports multi-model concurrent loading since V1 Block 5
 > (`Sources/Telemak/Server/Models.swift` — `/admin/load` + `/admin/unload`,
 > `models_loaded` list in `/health`). The dashboard UI in Odysseus still
-> assumes ONE model at a time. Finish the UI so Sophie can run a chat
+> assumes ONE model at a time. Finish the UI so the operator can run a chat
 > model + an embedder side-by-side on the same Mac without ssh-curl
 > gymnastics.
 >
@@ -97,8 +97,8 @@ pipeline mode).
 Mock :
 
 ```
-┌─ Telemak (max-64) ──────────── ● 2 loaded · 38 / 64 GB wired ──────┐
-│  telemak · native swift · single-node · http://192.168.86.50:8003   │
+┌─ Telemak (64 GB node) ──────────── ● 2 loaded · 38 / 64 GB wired ──────┐
+│  telemak · native swift · single-node · http://<telemak-host>:8003   │
 │  [Refresh] [Cluster settings]                                       │
 │                                                                     │
 │  Loaded models                                                      │
@@ -182,7 +182,7 @@ keep the dashboard rows showing just the model id + alias.
   buttons + "+ Load another model" form
 - [ ] `renderTelemakModelsCard` (Models tab) mirrors the same list
 - [ ] Memory pill in the card header shows wired used/total
-- [ ] Companion smoke : load 2 models on max-64, chat with one,
+- [ ] Companion smoke : load 2 models on 64 GB node, chat with one,
   embed with the other via `cluster_id:short_id` aliases — both
   work concurrently
 - [ ] No regression on single-model Telemak clusters
@@ -192,7 +192,7 @@ keep the dashboard rows showing just the model id + alias.
 - Per-model tok/s metrics in the list rows (deferred to V1.x once
   `Sources/Telemak/Engine/ModelRegistry.swift` tracks per-model
   stats).
-- Mac menu-bar load/unload (Sophie's decision : the menubar already
+- Mac menu-bar load/unload (the operator's decision : the menubar already
   has a "Open dashboard" link, all interactive work happens in the
   Odysseus dashboard).
 - MTP speculative decoding (V2, gated on

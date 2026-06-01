@@ -1,37 +1,27 @@
 #!/bin/sh
-# Shared host inventory for Telemak operator scripts.
+# Shared host inventory loader for Telemak operator scripts.
+#
+# The real fleet inventory is intentionally local-only. Copy
+# scripts/telemak-hosts.example.sh to scripts/telemak-hosts.local.sh and edit
+# it for your LAN before running deploy or rollback scripts.
 
 set -eu
 
-telemak_hosts() {
-  cat <<'EOF'
-ultra-512|192.168.86.29|admin|/Users/admin/telemak/Release.deepseek|8013|eu.odyssai.telemak.deepseek|eu.odyssai.telemak.deepseek.menubar
-ultra-256a|192.168.86.30|admin|/Users/admin/telemak/Release|8003|eu.odyssai.telemak|eu.odyssai.telemak.menubar
-ultra-256b|192.168.86.31|admin|/Users/admin/telemak/Release|8003|eu.odyssai.telemak|eu.odyssai.telemak.menubar
-ultra-256c|192.168.86.32|admin|/Users/admin/telemak/Release|8003|eu.odyssai.telemak|eu.odyssai.telemak.menubar
-ultra-96|192.168.86.49|admin|/Users/admin/telemak/Release|8003|eu.odyssai.telemak|eu.odyssai.telemak.menubar
-max-64|192.168.86.50|admin|/Users/admin/telemak/Release|8003|eu.odyssai.telemak|eu.odyssai.telemak.menubar
+ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+LOCAL_HOSTS="$ROOT/scripts/telemak-hosts.local.sh"
+
+if [ ! -f "$LOCAL_HOSTS" ]; then
+  cat >&2 <<'EOF'
+missing local Telemak host inventory: scripts/telemak-hosts.local.sh
+
+Create it from the public template:
+  cp scripts/telemak-hosts.example.sh scripts/telemak-hosts.local.sh
+
+Then replace the placeholder hosts, IPs, users, release paths, ports, and
+LaunchAgent labels with your own LAN inventory.
 EOF
-}
+  return 1 2>/dev/null || exit 1
+fi
 
-telemak_host_lookup() {
-  needle="$1"
-  telemak_hosts | awk -F'|' -v needle="$needle" '
-    $1 == needle || $2 == needle || ("." substr($2, 12)) == needle || substr($2, 12) == needle {
-      print
-      found = 1
-      exit
-    }
-    END {
-      if (!found) {
-        exit 1
-      }
-    }
-  '
-}
-
-telemak_host_field() {
-  entry="$1"
-  index="$2"
-  printf '%s\n' "$entry" | awk -F'|' -v index="$index" '{ print $index }'
-}
+# shellcheck source=scripts/telemak-hosts.local.sh
+. "$LOCAL_HOSTS"

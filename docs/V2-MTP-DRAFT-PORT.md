@@ -1,7 +1,7 @@
 # Telemak V2 — Port `qwen3_5_mtp` draft architecture
 
 > **Goal** : enable **MTP speculative decoding** in Telemak so
-> Qwen3.6-35B-A3B serves at ~76 tok/s instead of ~47 tok/s on max-64
+> Qwen3.6-35B-A3B serves at ~76 tok/s instead of ~47 tok/s on 64 GB node
 > (1.6× speedup demonstrated by Inferencer.app on the same model
 > with the same draft repo).
 >
@@ -50,10 +50,10 @@ What's live on `inferencerlabs/Qwen3.6-35B-A3B-MTP-MLX-9bit` :
   can pop an MTP drafter out of any Qwen3.5/3.6 source from the
   dashboard.
 
-Smoke status : engine v0.3.0 deployed to max-64. Capability endpoint
+Smoke status : engine v0.3.0 deployed to 64 GB node. Capability endpoint
 serves the new shape ; load with a draft was blocked by **TCC Full
 Disk Access** — each new binary signature invalidates the prior
-grant, the operator (Sophie) must approve the new binary in System
+grant, the operator (the operator) must approve the new binary in System
 Settings → Privacy & Security → Full Disk Access before the loader
 can read `/Volumes/models`. Not a code bug.
 
@@ -272,7 +272,7 @@ It also publishes :
   drafters in V1.
 - A **splitter** (`split.py`) that takes any Qwen3.5 / Qwen3.6 source
   checkpoint with `mtp.*` weights and emits a standalone drafter
-  folder. **This unblocks Sophie's Argo target** — extracting an MTP
+  folder. **This unblocks the operator's Argo target** — extracting an MTP
   draft from Qwen3.5-397B-A17B becomes a Python one-liner instead of
   R&D.
 
@@ -446,7 +446,7 @@ them on the Argo cluster.
 2. Pair load via `POST /admin/load` succeeds, both models in memory.
 3. `POST /v1/chat/completions` produces a coherent completion at
    **measurably faster tok/s** than the main model alone — target
-   **>1.5×** on a 300-word reply benchmark on Qwen3.6-35B-A3B / max-64.
+   **>1.5×** on a 300-word reply benchmark on Qwen3.6-35B-A3B / 64 GB node.
 4. Acceptance rate per spec round exposed in `/admin/sessions` or
    similar telemetry (debug + tune).
 5. No regression on non-MTP main models (regression test : load a

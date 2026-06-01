@@ -9,6 +9,7 @@ import TelemakMTP
 /// `POST /admin/load`, `POST /admin/unload`.
 struct ModelsHandler: Sendable {
     let registry: ModelRegistry
+    let activity: ActivityTracker
 
     func add(to router: Router<BasicRequestContext>) {
         router.get("/v1/models") { _, _ async throws -> Response in
@@ -154,15 +155,18 @@ struct ModelsHandler: Sendable {
         }
         let modelId = ModelLoader.canonicalIdentifier(body.model)
         let draftId = body.draft_model.map(ModelLoader.canonicalIdentifier)
+        let activityId = await activity.begin(model: modelId, phase: .loading)
         let isEmbedder = EmbedderLoader.isEmbedder(identifier: modelId)
         if isEmbedder {
             if let draftId, !draftId.isEmpty {
+                await activity.finish(activityId)
                 return jsonError(.badRequest, code: "invalid_request_error",
                                   message: "draft_model is only valid for chat models")
             }
             do {
                 _ = try await registry.loadEmbedder(modelId)
             } catch ModelRegistry.LoadError.insufficientMemory(let needed, let available, let ceiling, let currentlyLoaded) {
+                await activity.fail(activityId, error: "insufficient memory loading embedder \(modelId)")
                 return insufficientMemoryError(
                     neededBytes: needed,
                     availableBytes: available,
@@ -170,12 +174,15 @@ struct ModelsHandler: Sendable {
                     currentlyLoaded: currentlyLoaded
                 )
             } catch ModelRegistry.LoadError.loadFailed(let why) {
+                await activity.fail(activityId, error: "could not load embedder \(modelId): \(why)")
                 return jsonError(.serviceUnavailable, code: "model_load_failed",
                                   message: "could not load embedder '\(modelId)': \(why)")
             } catch {
+                await activity.fail(activityId, error: "could not load embedder \(modelId): \(error)")
                 return jsonError(.serviceUnavailable, code: "model_load_failed",
                                   message: "could not load embedder '\(modelId)': \(error)")
             }
+            await activity.finish(activityId)
             let payload = ["status": "loaded", "model": modelId, "kind": "embedder"]
             let data = try JSONEncoder().encode(payload)
             return jsonResponse(.ok, data: data)
@@ -187,6 +194,7 @@ struct ModelsHandler: Sendable {
                 } ?? false
                 _ = try await registry.load(modelId, forceLLM: forceLLM)
             } catch ModelRegistry.LoadError.insufficientMemory(let needed, let available, let ceiling, let currentlyLoaded) {
+                await activity.fail(activityId, error: "insufficient memory loading model \(modelId)")
                 return insufficientMemoryError(
                     neededBytes: needed,
                     availableBytes: available,
@@ -194,9 +202,11 @@ struct ModelsHandler: Sendable {
                     currentlyLoaded: currentlyLoaded
                 )
             } catch ModelRegistry.LoadError.loadFailed(let why) {
+                await activity.fail(activityId, error: "could not load model \(modelId): \(why)")
                 return jsonError(.serviceUnavailable, code: "model_load_failed",
                                   message: "could not load model '\(modelId)': \(why)")
             } catch {
+                await activity.fail(activityId, error: "could not load model \(modelId): \(error)")
                 return jsonError(.serviceUnavailable, code: "model_load_failed",
                                   message: "could not load model '\(modelId)': \(error)")
             }
@@ -210,6 +220,7 @@ struct ModelsHandler: Sendable {
                     allowUnverified: body.allow_unverified_mtp ?? false
                 )
             } catch ModelRegistry.LoadError.insufficientMemory(let needed, let available, let ceiling, let currentlyLoaded) {
+                await activity.fail(activityId, error: "insufficient memory loading draft \(draftId)")
                 return insufficientMemoryError(
                     neededBytes: needed,
                     availableBytes: available,
@@ -217,13 +228,16 @@ struct ModelsHandler: Sendable {
                     currentlyLoaded: currentlyLoaded
                 )
             } catch ModelRegistry.LoadError.loadFailed(let why) {
+                await activity.fail(activityId, error: "main loaded but draft \(draftId) failed: \(why)")
                 return jsonError(.serviceUnavailable, code: "draft_load_failed",
                                   message: "main loaded but draft '\(draftId)' failed: \(why)")
             } catch {
+                await activity.fail(activityId, error: "main loaded but draft \(draftId) failed: \(error)")
                 return jsonError(.serviceUnavailable, code: "draft_load_failed",
                                   message: "main loaded but draft '\(draftId)' failed: \(error)")
             }
         }
+        await activity.finish(activityId)
         var payload: [String: String] = ["status": "loaded", "model": modelId]
         if let draftId, !draftId.isEmpty {
             payload["draft_model"] = draftId

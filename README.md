@@ -93,7 +93,7 @@ A SwiftUI `MenuBarExtra` app. Click the status icon to:
 
 - See **status** (running / stopped / unreachable), **loaded models**, **recent tok/s**, **request count**, **MLX wired memory**, **uptime**.
 - **Start / Stop / Restart** the local `telemak serve` LaunchAgent (`eu.odyssai.telemak`). Disabled when the endpoint is remote — start/stop only controls the local agent.
-- **Open Dashboard** — launches the configured URL in your browser (default: Odysseus dashboard at `http://192.168.86.141:8000/`).
+- **Open Dashboard** — launches the configured URL in your browser (default: Odysseus dashboard at `http://<odysseus-host>:8000/`).
 - **Settings** — change the endpoint URL, dashboard URL, and poll interval (persisted in `defaults` under `eu.odyssai.telemak.menubar`).
 - **Quit** — terminate the menu-bar app (telemak serve itself keeps running via launchd).
 

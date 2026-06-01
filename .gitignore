@@ -19,6 +19,7 @@ TODO.md
 # Local config / generated
 ~/.telemak/
 config.local.*
+scripts/telemak-hosts.local.sh
 *.log
 .xcbuild/
 *.profraw

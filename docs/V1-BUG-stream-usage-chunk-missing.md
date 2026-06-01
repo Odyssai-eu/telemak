@@ -6,14 +6,14 @@
 > les requêtes streaming Telemak, parce que Telemak ne les envoie
 > jamais dans le SSE stream.
 >
-> Découvert 2026-05-24 par Sophie qui voit dans la barre meta du chat
+> Découvert 2026-05-24 par the operator qui voit dans la barre meta du chat
 > Companion seulement `Duration: 8.25s · Chunks: 345 · Model: ...` au
 > lieu de la ligne complète avec tokens + tok/s.
 
 ## Repro
 
 ```bash
-curl -s -m 30 -N -X POST http://192.168.86.50:8003/v1/chat/completions \
+curl -s -m 30 -N -X POST http://<telemak-host>:8003/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model":"inferencerlabs/Qwen3.6-35B-A3B-MLX-9bit",

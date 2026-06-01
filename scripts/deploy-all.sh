@@ -8,7 +8,8 @@ ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
 . "$ROOT/scripts/telemak-hosts.sh"
 
 CONFIGURATION="Release"
-CANARY="ultra-256a"
+DEFAULT_CANARY="$(telemak_hosts | awk -F'|' 'NF { print $1; exit }')"
+CANARY="${TELEMAK_DEPLOY_CANARY:-$DEFAULT_CANARY}"
 SKIP_BUILD=0
 CANARY_ONLY=0
 
@@ -22,7 +23,7 @@ Deploy order:
   3. Smoke canary: binary version, /health, /admin/activity, menubar status.
   4. If canary passed, deploy every remaining inventory host.
 
-Hosts come from scripts/telemak-hosts.sh.
+Hosts come from scripts/telemak-hosts.local.sh.
 EOF
 }
 
@@ -158,6 +159,30 @@ rm -rf "$REMOTE_TMP"
 
 SERVER_PLIST="$HOME/Library/LaunchAgents/$SERVER_LABEL.plist"
 MENUBAR_PLIST="$HOME/Library/LaunchAgents/$MENUBAR_LABEL.plist"
+if [ -n "$MENUBAR_LABEL" ] && [ -x "$ACTIVE_RELEASE/Telemak.app/Contents/MacOS/Telemak" ]; then
+  cat > "$MENUBAR_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$MENUBAR_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$ACTIVE_RELEASE/Telemak.app/Contents/MacOS/Telemak</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>$HOME/telemak/menubar.out</string>
+  <key>StandardErrorPath</key>
+  <string>$HOME/telemak/menubar.err</string>
+</dict>
+</plist>
+EOF
+fi
 restart_label "$SERVER_LABEL" "$SERVER_PLIST"
 restart_label "$MENUBAR_LABEL" "$MENUBAR_PLIST"
 

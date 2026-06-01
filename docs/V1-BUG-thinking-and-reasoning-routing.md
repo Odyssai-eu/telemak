@@ -8,13 +8,13 @@
 >
 > Découvert 2026-05-24 sur `telemak-max64` avec le modèle
 > `inferencerlabs/Qwen3.5-35B-A3B-MLX-9bit` proxyé via Odysseus
-> (`http://192.168.86.141:8000/v1/chat/completions` cluster
+> (`http://<odysseus-host>:8000/v1/chat/completions` cluster
 > `kind=telemak`).
 
 ## Repro
 
 ```bash
-curl -s -m 15 -X POST http://192.168.86.50:8003/v1/chat/completions \
+curl -s -m 15 -X POST http://<telemak-host>:8003/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"inferencerlabs/Qwen3.5-35B-A3B-MLX-9bit",
        "stream":true,

@@ -7,21 +7,20 @@ Telemak keeps `v0.6.15` as the bronze rollback baseline:
 
 ## Inventory
 
-The host inventory is centralized in `scripts/telemak-hosts.sh`.
+The public repository ships only `scripts/telemak-hosts.example.sh`.
+Copy it to `scripts/telemak-hosts.local.sh` and edit the LAN inventory for
+the operator site. The local file is gitignored.
 
-Supported hosts:
+Example host names:
 
-- `ultra-512` / `.29` -> `/Users/admin/telemak/Release.deepseek`, port `8013`, LaunchAgent `eu.odyssai.telemak.deepseek`
-- `ultra-256a` / `.30` -> `/Users/admin/telemak/Release`
-- `ultra-256b` / `.31` -> `/Users/admin/telemak/Release`
-- `ultra-256c` / `.32` -> `/Users/admin/telemak/Release`
-- `ultra-96` / `.49` -> `/Users/admin/telemak/Release`
-- `max-64` / `.50` -> `/Users/admin/telemak/Release`
+- `node-a` -> `/Users/admin/telemak/Release`, port `8003`
+- `node-b` -> `/Users/admin/telemak/Release`, port `8003`
+- `large-node` -> `/Users/admin/telemak/Release.deepseek`, port `8013`
 
 ## Deploy All
 
 ```bash
-scripts/deploy-all.sh --canary ultra-256a
+scripts/deploy-all.sh --canary node-a
 ```
 
 The script builds `Release`, deploys only the canary first, runs smoke checks,
@@ -41,20 +40,20 @@ If the canary fails, no other host is touched.
 Rollback to the bronze baseline:
 
 ```bash
-scripts/rollback-host.sh ultra-256a
+scripts/rollback-host.sh node-a
 ```
 
 Rollback to the latest previous release:
 
 ```bash
-scripts/rollback-host.sh ultra-256a prev1
+scripts/rollback-host.sh node-a prev1
 ```
 
 Rollback accepts inventory name, IP, or last octet:
 
 ```bash
-scripts/rollback-host.sh .32 bronze-0.6.15
-scripts/rollback-host.sh 192.168.86.50 prev1
+scripts/rollback-host.sh 10.0.0.12 bronze-0.6.15
+scripts/rollback-host.sh <telemak-host> prev1
 ```
 
 The script refuses targets without `BRONZE-MANIFEST.txt` or a runnable

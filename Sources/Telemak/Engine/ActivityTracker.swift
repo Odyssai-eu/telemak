@@ -2,6 +2,7 @@ import Foundation
 
 public actor ActivityTracker {
     public enum Phase: String, Codable, Sendable {
+        case loading
         case prefill
         case decode
         case streaming
@@ -12,6 +13,7 @@ public actor ActivityTracker {
         public let activeRequests: Int
         public let currentModel: String?
         public let currentRequestStartedAt: String?
+        public let currentElapsedS: Double?
         public let currentGeneratedTokens: Int
         public let currentTokS: Double?
         public let currentPhase: Phase
@@ -21,6 +23,7 @@ public actor ActivityTracker {
             case activeRequests = "active_requests"
             case currentModel = "current_model"
             case currentRequestStartedAt = "current_request_started_at"
+            case currentElapsedS = "current_elapsed_s"
             case currentGeneratedTokens = "current_generated_tokens"
             case currentTokS = "current_tok_s"
             case currentPhase = "current_phase"
@@ -32,6 +35,7 @@ public actor ActivityTracker {
             try container.encode(activeRequests, forKey: .activeRequests)
             try container.encode(currentModel, forKey: .currentModel)
             try container.encode(currentRequestStartedAt, forKey: .currentRequestStartedAt)
+            try container.encode(currentElapsedS, forKey: .currentElapsedS)
             try container.encode(currentGeneratedTokens, forKey: .currentGeneratedTokens)
             try container.encode(currentTokS, forKey: .currentTokS)
             try container.encode(currentPhase, forKey: .currentPhase)
@@ -114,6 +118,7 @@ public actor ActivityTracker {
             activeRequests: active.count,
             currentModel: current?.model,
             currentRequestStartedAt: current.map { dateFormatter.string(from: $0.startedAt) },
+            currentElapsedS: current == nil ? nil : elapsed,
             currentGeneratedTokens: current?.generatedTokens ?? 0,
             currentTokS: tokS,
             currentPhase: current?.phase ?? .idle,

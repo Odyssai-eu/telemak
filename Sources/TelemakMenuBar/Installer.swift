@@ -68,12 +68,12 @@ final class InstallerModel: ObservableObject {
             do {
                 let result = try TelemakInstaller.install(modelsDir: URL(fileURLWithPath: modelsDir, isDirectory: true))
                 details = result.joined(separator: "\n")
-                status = "Waiting for health check..."
-                smokeOK = await TelemakInstaller.waitForHealth(timeoutSeconds: 30)
+                status = "Waiting for smoke checks..."
+                smokeOK = await TelemakInstaller.waitForInstallSmoke(timeoutSeconds: 30)
                 installed = TelemakInstaller.isInstalled
                 status = smokeOK ? "Installed and running" : "Installed, health check pending"
                 if !smokeOK {
-                    details += "\nHealth did not answer within 30 seconds. Check Full Disk Access and logs in ~/telemak/."
+                    details += "\n/health and /admin/activity did not both answer within 30 seconds. Check Full Disk Access and logs in ~/telemak/."
                 }
             } catch {
                 status = "Install failed"
@@ -293,25 +293,41 @@ enum TelemakInstaller {
         try run(["/bin/launchctl", "bootstrap", "gui/\(uid)", menubarPlist.path])
         try run(["/bin/launchctl", "kickstart", "-k", "gui/\(uid)/\(serverLabel)"])
         log.append("LaunchAgents bootstrapped.")
+        log.append("Smoke checks: /health + /admin/activity")
         return log
     }
 
-    static func waitForHealth(timeoutSeconds: Int) async -> Bool {
-        guard let url = URL(string: "http://127.0.0.1:8003/health") else { return false }
+    static func waitForInstallSmoke(timeoutSeconds: Int) async -> Bool {
         let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
         while Date() < deadline {
-            do {
-                var request = URLRequest(url: url)
-                request.timeoutInterval = 2
-                let (_, response) = try await URLSession.shared.data(for: request)
-                if (response as? HTTPURLResponse)?.statusCode == 200 {
-                    return true
-                }
-            } catch {
-                try? await Task.sleep(for: .seconds(2))
+            let healthOK = await endpointOK(path: "/health", needsAdminKey: false)
+            let activityOK = healthOK ? await endpointOK(path: "/admin/activity", needsAdminKey: true) : false
+            if healthOK && activityOK {
+                return true
             }
+            try? await Task.sleep(for: .seconds(2))
         }
         return false
+    }
+
+    private static func endpointOK(path: String, needsAdminKey: Bool) async -> Bool {
+        guard let url = URL(string: "http://127.0.0.1:8003\(path)") else { return false }
+        do {
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 2
+            if needsAdminKey {
+                let keyFile = telemakRoot.appendingPathComponent("api-key.txt")
+                let key = (try? String(contentsOf: keyFile, encoding: .utf8))?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if !key.isEmpty {
+                    request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+                }
+            }
+            let (_, response) = try await URLSession.shared.data(for: request)
+            return (response as? HTTPURLResponse)?.statusCode == 200
+        } catch {
+            return false
+        }
     }
 
     static func openSystemSettings(anchor: String) {

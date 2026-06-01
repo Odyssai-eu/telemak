@@ -25,7 +25,7 @@ func buildApplication(
     ChatCompletionsHandler(registry: registry, stats: stats, activity: activity, sessionStore: sessionStore, wiredMemory: wiredMemory).add(to: router)
     AnthropicMessagesHandler(registry: registry, stats: stats, activity: activity, sessionStore: sessionStore).add(to: router)
     EmbeddingsHandler(registry: registry, activity: activity).add(to: router)
-    ModelsHandler(registry: registry).add(to: router)
+    ModelsHandler(registry: registry, activity: activity).add(to: router)
     SessionsHandler(sessionStore: sessionStore).add(to: router)
     CapabilitiesHandler(registry: registry).add(to: router)
 

@@ -3,7 +3,7 @@ import Foundation
 /// Wraps `launchctl` calls to control the local Telemak LaunchAgent.
 ///
 /// Affects ONLY the machine the menu-bar app is running on — no SSH.
-/// When pointing at a remote endpoint (e.g. 192.168.86.50:8003), the
+/// When pointing at a remote endpoint (e.g. http://<host>:8003), the
 /// Start/Stop buttons are disabled.
 enum LaunchAgentControl {
     static var label: String {

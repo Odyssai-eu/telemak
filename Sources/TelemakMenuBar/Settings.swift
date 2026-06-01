@@ -5,7 +5,7 @@ import SwiftUI
 @MainActor
 final class Settings: ObservableObject {
     @AppStorage("endpoint") var endpoint: String = "http://127.0.0.1:8003"
-    @AppStorage("dashboard") var dashboard: String = "http://192.168.86.141:8000/"
+    @AppStorage("dashboard") var dashboard: String = "http://localhost:8000/"
     @AppStorage("pollInterval") var pollInterval: Double = 2.0
 
     init() {

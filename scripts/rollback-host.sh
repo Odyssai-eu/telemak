@@ -12,11 +12,11 @@ usage() {
 Usage: scripts/rollback-host.sh <host> [target] [--force]
 
 host:
-  inventory name, IP, or last octet, e.g. ultra-256c, 192.168.86.32, .32
+  inventory name or host address, e.g. node-c or 10.0.0.12
 
 target:
   bronze-0.6.15       -> ~/telemak/Release.bronze-0.6.15 (default)
-  prev1               -> Release.prev1, or Release.deepseek.prev1 on ultra-512
+  prev1               -> active release sibling with .prev1 suffix
   Release.prev1       -> explicit sibling of active release
   /absolute/path      -> explicit remote target path
 

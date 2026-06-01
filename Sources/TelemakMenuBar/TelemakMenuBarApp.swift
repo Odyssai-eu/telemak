@@ -127,6 +127,7 @@ final class HealthPoller: ObservableObject {
     @Published var activeRequests: Int = 0
     @Published var currentModel: String?
     @Published var currentRequestStartedAt: String?
+    @Published var currentElapsedSeconds: Double?
     @Published var currentGeneratedTokens: Int = 0
     @Published var currentTokPerSec: Double?
     @Published var currentPhase: String = "idle"
@@ -218,6 +219,7 @@ final class HealthPoller: ObservableObject {
             activeRequests = json["active_requests"] as? Int ?? 0
             currentModel = json["current_model"] as? String
             currentRequestStartedAt = json["current_request_started_at"] as? String
+            currentElapsedSeconds = json["current_elapsed_s"] as? Double
             currentGeneratedTokens = json["current_generated_tokens"] as? Int ?? 0
             currentTokPerSec = json["current_tok_s"] as? Double
             currentPhase = json["current_phase"] as? String ?? "idle"
@@ -231,6 +233,7 @@ final class HealthPoller: ObservableObject {
         activeRequests = 0
         currentModel = nil
         currentRequestStartedAt = nil
+        currentElapsedSeconds = nil
         currentGeneratedTokens = 0
         currentTokPerSec = nil
         currentPhase = "idle"
@@ -426,6 +429,13 @@ struct MenuBarPopover: View {
                     muted: false
                 )
             }
+            if let elapsed = poller.currentElapsedSeconds {
+                metricRow(
+                    systemImage: "timer",
+                    label: String(format: "%.0fs elapsed", elapsed),
+                    muted: false
+                )
+            }
             if let runtimeLastError = poller.runtimeLastError {
                 metricRow(
                     systemImage: "exclamationmark.triangle",
@@ -520,7 +530,7 @@ struct SettingsView: View {
             Section("Telemak endpoint") {
                 TextField("URL", text: $settings.endpoint)
                     .textFieldStyle(.roundedBorder)
-                Text("e.g. `http://127.0.0.1:8003` (local) or `http://192.168.86.50:8003` (remote target). Start/Stop only works when local.")
+                Text("e.g. `http://127.0.0.1:8003` (local) or `http://<host>:8003` (remote target). Start/Stop only works when local.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

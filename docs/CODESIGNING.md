@@ -13,15 +13,15 @@
 ## One-time setup (per build host)
 
 The build host is whichever machine runs `./scripts/build.sh Release` —
-historically Sophie's workstation, but max-64 itself works too.
+historically the operator's workstation, but 64 GB node itself works too.
 
-If the identity already exists on `max-64`, restore it on a new build host
+If the identity already exists on `64 GB node`, restore it on a new build host
 instead of minting a fresh certificate. That preserves the same signing
 authority across machines.
 
 ```bash
 mkdir -p ~/.telemak-codesign
-scp admin@max-64.lan:/Users/admin/.telemak-codesign/telemak.{p12,cert} ~/.telemak-codesign/
+scp admin@<telemak-host>.local:/Users/admin/.telemak-codesign/telemak.{p12,cert} ~/.telemak-codesign/
 chmod 600 ~/.telemak-codesign/telemak.{p12,cert}
 
 security import ~/.telemak-codesign/telemak.p12 -P telemak \
@@ -95,8 +95,8 @@ SSH non-interactive (even with sudo) is rejected by macOS Sequoia with
 no user interaction was possible`.
 
 The fix : connect to the host via **Screen Sharing**
-(`vnc://192.168.86.50` in Finder → Connect) so the SSH session inherits
-a console user session. Open Terminal on max-64 and run the command
+(`vnc://<telemak-host>` in Finder → Connect) so the SSH session inherits
+a console user session. Open Terminal on 64 GB node and run the command
 there. Sudo prompts for the admin password ; trust takes.
 
 To verify the trust took :
