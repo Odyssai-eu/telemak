@@ -71,6 +71,7 @@ public struct MTPCompatibility: Codable, Equatable, Sendable {
         ])
         let modelType = string(config["model_type"]).lowercased()
         let textConfig = (config["text_config"] as? [String: Any]) ?? config
+        let textModelType = string(textConfig["model_type"]).lowercased()
         let mtpLayerCount = int(textConfig["mtp_num_hidden_layers"])
             ?? int(textConfig["num_nextn_predict_layers"])
             ?? int(config["num_nextn_predict_layers"])
@@ -103,7 +104,18 @@ public struct MTPCompatibility: Codable, Equatable, Sendable {
             )
         }
 
-        guard isSupportedEmbeddedArchitecture(modelType: modelType) else {
+        if isMoEMTPHead(modelType: modelType, textModelType: textModelType, textConfig: textConfig, keys: keys) {
+            return MTPCompatibility(
+                status: .incompatibleArchitecture,
+                reason: "embedded MTP head is MoE; dense Qwen3.6-27B MTP is supported first, MoE MTP stays blocked on #70",
+                source: directory.path,
+                contractPath: runtimeContractURL?.path,
+                overrideRequired: false,
+                autoEnabled: false
+            )
+        }
+
+        guard isSupportedDenseEmbeddedArchitecture(modelType: modelType, textModelType: textModelType) else {
             return MTPCompatibility(
                 status: .incompatibleArchitecture,
                 reason: "MTP markers exist, but model_type '\(modelType.isEmpty ? "unknown" : modelType)' is not supported by Telemak's native MTP path",
@@ -115,6 +127,17 @@ public struct MTPCompatibility: Codable, Equatable, Sendable {
         }
 
         if let runtimeContractURL {
+            let archId = runtimeArchId(runtimeContractURL)
+            if let archId, archId != "qwen3-next-mtp" {
+                return MTPCompatibility(
+                    status: .incompatibleArchitecture,
+                    reason: "MTP runtime contract arch_id '\(archId)' is not supported by Telemak's dense Qwen path",
+                    source: directory.path,
+                    contractPath: runtimeContractURL.path,
+                    overrideRequired: false,
+                    autoEnabled: false
+                )
+            }
             return MTPCompatibility(
                 status: .verifiedEmbeddedMTP,
                 reason: "embedded MTP markers and runtime contract found",
@@ -134,14 +157,37 @@ public struct MTPCompatibility: Codable, Equatable, Sendable {
         )
     }
 
-    private static func isSupportedEmbeddedArchitecture(modelType: String) -> Bool {
+    private static func isSupportedDenseEmbeddedArchitecture(
+        modelType: String,
+        textModelType: String
+    ) -> Bool {
         [
             "qwen3_5",
-            "qwen3_5_moe",
             "qwen3_5_text",
             "qwen3_next",
-            "qwen3_next_moe",
-        ].contains(modelType)
+        ].contains(modelType) || [
+            "qwen3_5_text",
+            "qwen3_next",
+        ].contains(textModelType)
+    }
+
+    private static func isMoEMTPHead(
+        modelType: String,
+        textModelType: String,
+        textConfig: [String: Any],
+        keys: [String]
+    ) -> Bool {
+        if modelType.contains("moe") || textModelType.contains("moe") { return true }
+        let numExperts = int(textConfig["num_experts"]) ?? 0
+        if numExperts > 0 { return true }
+        return keys.contains { key in
+            key.contains(".mlp.experts.") || key.contains(".mlp.shared_expert")
+        }
+    }
+
+    private static func runtimeArchId(_ url: URL) -> String? {
+        let root = readJSON(url)
+        return string(root["arch_id"]).lowercased().isEmpty ? nil : string(root["arch_id"]).lowercased()
     }
 
     private static func isMTPWeightKey(_ key: String) -> Bool {

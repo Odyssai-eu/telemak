@@ -206,6 +206,7 @@ public enum ModelLoader {
             root["vision_config"] = nil
             droppedEmptyVision = true
         }
+        let tokenizerPatch = tokenizerConfigPatch(originalDir: originalDir, root: root)
         let aliasedMiniMaxM2 = (root["model_type"] as? String) == "minimax_m2"
         if aliasedMiniMaxM2 {
             root["model_type"] = "minimax"
@@ -219,14 +220,19 @@ public enum ModelLoader {
         // Already has `quantization`? Nothing to fix (modulo the
         // vision_config strip above).
         guard root["quantization"] == nil, let quantConfig = root["quantization_config"] else {
-            if !droppedEmptyVision && !aliasedMiniMaxM2 && !normalizedMistral3EOS {
+            if !droppedEmptyVision && !aliasedMiniMaxM2 && !normalizedMistral3EOS && tokenizerPatch == nil {
                 return originalDir
             }
             // Still need to stage the dir to rewrite config.json with
             // vision_config removed ; fall through to the staging
             // block below by injecting an empty quantization carrier.
             root["__telemak_force_stage__"] = true
-            return try writeStaged(originalDir: originalDir, root: root, id: id)
+            return try writeStaged(
+                originalDir: originalDir,
+                root: root,
+                id: id,
+                patchedFiles: tokenizerPatch.map { ["tokenizer_config.json": $0] } ?? [:]
+            )
         }
 
         // Some inferencerlabs configs omit `bits` from `quantization_config`
@@ -260,10 +266,20 @@ public enum ModelLoader {
         root["quantization"] = enriched
         root["quantization_config"] = enriched
 
-        return try writeStaged(originalDir: originalDir, root: root, id: id)
+        return try writeStaged(
+            originalDir: originalDir,
+            root: root,
+            id: id,
+            patchedFiles: tokenizerPatch.map { ["tokenizer_config.json": $0] } ?? [:]
+        )
     }
 
-    private static func writeStaged(originalDir: URL, root: [String: Any], id: String) throws -> URL {
+    private static func writeStaged(
+        originalDir: URL,
+        root: [String: Any],
+        id: String,
+        patchedFiles: [String: [String: Any]] = [:]
+    ) throws -> URL {
         var root = root
         root["__telemak_force_stage__"] = nil  // never persist this marker
         let stagedRoot = FileManager.default
@@ -274,9 +290,9 @@ public enum ModelLoader {
         try FileManager.default.createDirectory(at: stagedDir, withIntermediateDirectories: true)
 
         // Symlink every file in originalDir → stagedDir, except config.json
-        // which we write from the patched JSON.
+        // and explicitly patched JSON files.
         let entries = (try? FileManager.default.contentsOfDirectory(atPath: originalDir.path)) ?? []
-        for name in entries where !name.hasPrefix(".") && name != "config.json" {
+        for name in entries where !name.hasPrefix(".") && name != "config.json" && patchedFiles[name] == nil {
             let src = originalDir.appendingPathComponent(name)
             let dst = stagedDir.appendingPathComponent(name)
             try? FileManager.default.removeItem(at: dst)
@@ -287,7 +303,37 @@ public enum ModelLoader {
         let stagedConfigURL = stagedDir.appendingPathComponent("config.json")
         try patchedConfig.write(to: stagedConfigURL, options: .atomic)
 
+        for (name, json) in patchedFiles {
+            let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: stagedDir.appendingPathComponent(name), options: .atomic)
+        }
+
         return stagedDir
+    }
+
+    private static func tokenizerConfigPatch(originalDir: URL, root: [String: Any]) -> [String: Any]? {
+        let modelType = (root["model_type"] as? String ?? "").lowercased()
+        let textModelType = ((root["text_config"] as? [String: Any])?["model_type"] as? String ?? "").lowercased()
+        let isQwen35Family = [
+            "qwen3_5", "qwen3_5_text", "qwen3_next",
+        ].contains(modelType) || [
+            "qwen3_5_text", "qwen3_next",
+        ].contains(textModelType)
+        guard isQwen35Family else { return nil }
+
+        let tokenizerURL = originalDir.appendingPathComponent("tokenizer_config.json")
+        var tokenizerRoot: [String: Any] = [:]
+        if let data = try? Data(contentsOf: tokenizerURL),
+           let decoded = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? [String: Any]
+        {
+            tokenizerRoot = decoded
+        }
+        let tokenizerClass = tokenizerRoot["tokenizer_class"] as? String
+        if tokenizerClass == "TokenizersBackend" {
+            return nil
+        }
+        tokenizerRoot["tokenizer_class"] = "TokenizersBackend"
+        return tokenizerRoot
     }
 
     /// Resolve `<root>/<id>/snapshots/<hash>/` (or `<root>/<id>/` if no

@@ -71,7 +71,7 @@ import TelemakMTP
             "model_type": "qwen3_5",
             "text_config": ["mtp_num_hidden_layers": 1],
         ],
-        runtimeContract: ["runtime": "telemak", "schema": 1]
+        runtimeContract: ["arch_id": "qwen3-next-mtp", "runtime": "telemak", "schema": 1]
     )
     defer { try? FileManager.default.removeItem(at: dir) }
 
@@ -80,6 +80,49 @@ import TelemakMTP
     #expect(compatibility.status == .verifiedEmbeddedMTP)
     #expect(compatibility.overrideRequired == false)
     #expect(compatibility.autoEnabled == true)
+}
+
+@Test func mtpCompatibilityAcceptsDenseQwenNextEmbeddedContract() throws {
+    let dir = try temporaryModelDir(
+        config: [
+            "model_type": "qwen3_5",
+            "mlx_lm_extra_tensors": ["mtp_file": "mtp.safetensors", "mtp_tensor_count": 15],
+            "text_config": [
+                "model_type": "qwen3_5_text",
+                "mtp_num_hidden_layers": 1,
+                "hidden_size": 5120,
+            ],
+        ],
+        runtimeContract: ["arch_id": "qwen3-next-mtp", "mtp_depth_max": 3]
+    )
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let compatibility = MTPCompatibility.inspect(modelId: "test/qwen-27b-mtp", directory: dir)
+
+    #expect(compatibility.status == .verifiedEmbeddedMTP)
+    #expect(compatibility.canRunWithoutOverride == true)
+    #expect(compatibility.autoEnabled == true)
+}
+
+@Test func mtpCompatibilityRejectsMoEEmbeddedContractUntilIssue70() throws {
+    let dir = try temporaryModelDir(
+        config: [
+            "model_type": "qwen3_next",
+            "text_config": [
+                "model_type": "qwen3_next_moe",
+                "mtp_num_hidden_layers": 1,
+                "num_experts": 512,
+            ],
+        ],
+        runtimeContract: ["arch_id": "qwen3-next-mtp", "mtp_depth_max": 3]
+    )
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let compatibility = MTPCompatibility.inspect(modelId: "test/qwen-moe-mtp", directory: dir)
+
+    #expect(compatibility.status == .incompatibleArchitecture)
+    #expect(compatibility.autoEnabled == false)
+    #expect(compatibility.reason.contains("MoE"))
 }
 
 @Test func mtpCompatibilityClassifiesSidecarDraftsAsOverrideOnly() throws {

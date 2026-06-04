@@ -229,8 +229,19 @@ enum TelemakInstaller {
 
         let mlxBundle = resources.appendingPathComponent("mlx-swift_Cmlx.bundle", isDirectory: true)
         if fm.fileExists(atPath: mlxBundle.path) {
-            try copyItemReplacing(mlxBundle, releaseDir.appendingPathComponent("mlx-swift_Cmlx.bundle", isDirectory: true))
-            log.append("Installed MLX Metal bundle.")
+            let bundleURLs = try fm.contentsOfDirectory(
+                at: resources,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )
+            .filter { $0.pathExtension == "bundle" }
+            for bundle in bundleURLs {
+                try copyItemReplacing(
+                    bundle,
+                    releaseDir.appendingPathComponent(bundle.lastPathComponent, isDirectory: true)
+                )
+            }
+            log.append("Installed \(bundleURLs.count) runtime bundles.")
         } else {
             throw InstallerError.missingResource("mlx-swift_Cmlx.bundle")
         }

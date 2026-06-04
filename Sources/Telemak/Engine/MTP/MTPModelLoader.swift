@@ -33,6 +33,8 @@ public enum MTPModelLoader {
         case configMissing(dir: String)
         case configDecodeFailed(dir: String, underlying: String)
         case wrongModelType(dir: String, gotType: String)
+        case embeddedMTPMissing(dir: String)
+        case embeddedMTPStageFailed(underlying: String)
         case noSafetensors(dir: String)
         case weightLoadFailed(underlying: String)
 
@@ -47,6 +49,10 @@ public enum MTPModelLoader {
                 return "config.json decode failed in \(dir): \(why)"
             case .wrongModelType(let dir, let got):
                 return "unsupported MTP draft model_type '\(got)' in \(dir)/config.json"
+            case .embeddedMTPMissing(let dir):
+                return "embedded MTP contract found, but no mtp.safetensors artifact exists in \(dir)"
+            case .embeddedMTPStageFailed(let why):
+                return "could not stage embedded MTP weights: \(why)"
             case .noSafetensors(let dir):
                 return "no *.safetensors files found in \(dir)"
             case .weightLoadFailed(let why):
@@ -58,7 +64,7 @@ public enum MTPModelLoader {
     /// Resolve `identifier` to a directory, stage its config for MLX
     /// (handles the inferencerlabs `quantization_config` quirk the
     /// same way `ModelLoader` does), then instantiate + load weights.
-    public static func load(identifier: String) throws -> LoadedDraftModel {
+    public static func load(identifier: String, embedded: Bool = false) throws -> LoadedDraftModel {
         let dir = try resolveDir(identifier)
         let staged = (try? ModelLoader.prepareConfigForMLX(originalDir: dir, id: identifier)) ?? dir
         let configURL = staged.appendingPathComponent("config.json")
@@ -69,6 +75,9 @@ public enum MTPModelLoader {
             throw LoadError.configDecodeFailed(dir: staged.path, underlying: "invalid JSON")
         }
         let modelType = (root["model_type"] as? String) ?? ""
+        if embedded {
+            return .qwen35(try loadEmbeddedQwen35MTP(staged: staged, configData: configData, root: root))
+        }
         switch modelType {
         case "qwen3_5_mtp":
             return .qwen35(try loadQwen35MTP(staged: staged, configData: configData))
@@ -77,6 +86,79 @@ public enum MTPModelLoader {
         default:
             throw LoadError.wrongModelType(dir: staged.path, gotType: modelType)
         }
+    }
+
+    /// Load a native dense MTP head embedded in the main model directory.
+    ///
+    /// MTPLX-style artifacts keep the trunk shards and `mtp.safetensors`
+    /// together. `loadWeights` loads every safetensors file under a
+    /// directory, so loading the draft directly from the model root would
+    /// feed trunk weights into `Qwen35MTPDraftModel` and fail verification.
+    /// Stage only `config.json` + the declared MTP safetensors through
+    /// symlinks, then reuse the normal draft loader.
+    private static func loadEmbeddedQwen35MTP(
+        staged: URL,
+        configData: Data,
+        root: [String: Any]
+    ) throws -> Qwen35MTPDraftModel {
+        let mtpFile = embeddedMTPFile(root: root) ?? "mtp.safetensors"
+        let mtpURL = staged.appendingPathComponent(mtpFile)
+        guard FileManager.default.fileExists(atPath: mtpURL.path) else {
+            throw LoadError.embeddedMTPMissing(dir: staged.path)
+        }
+
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("telemak-embedded-mtp-\(UUID().uuidString)")
+        do {
+            try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+            let draftConfigData = try embeddedDraftConfigData(root: root, fallback: configData)
+            try draftConfigData.write(to: tmp.appendingPathComponent("config.json"), options: .atomic)
+            try FileManager.default.createSymbolicLink(
+                at: tmp.appendingPathComponent((mtpFile as NSString).lastPathComponent),
+                withDestinationURL: mtpURL
+            )
+            defer { try? FileManager.default.removeItem(at: tmp) }
+            return try loadQwen35MTP(staged: tmp, configData: draftConfigData)
+        } catch let error as LoadError {
+            throw error
+        } catch {
+            throw LoadError.embeddedMTPStageFailed(underlying: "\(error)")
+        }
+    }
+
+    private static func embeddedMTPFile(root: [String: Any]) -> String? {
+        guard let extras = root["mlx_lm_extra_tensors"] as? [String: Any],
+              let file = extras["mtp_file"] as? String,
+              !file.isEmpty
+        else { return nil }
+        return file
+    }
+
+    private static func embeddedDraftConfigData(root: [String: Any], fallback: Data) throws -> Data {
+        var draftRoot = root
+        if let mtpQuantization = root["mtplx_mtp_quantization"] as? [String: Any] {
+            let quantization = compactQuantization(mtpQuantization)
+            draftRoot["quantization"] = quantization
+            draftRoot["quantization_config"] = quantization
+            return try JSONSerialization.data(
+                withJSONObject: draftRoot,
+                options: [.prettyPrinted, .sortedKeys]
+            )
+        }
+        return fallback
+    }
+
+    private static func compactQuantization(_ raw: [String: Any]) -> [String: Any] {
+        var out: [String: Any] = [:]
+        for key in ["bits", "group_size", "mode"] {
+            if let value = raw[key] {
+                out[key] = value
+            }
+        }
+        if out["mode"] == nil {
+            out["mode"] = "affine"
+        }
+        return out
     }
 
     private static func loadQwen35MTP(staged: URL, configData: Data) throws -> Qwen35MTPDraftModel {

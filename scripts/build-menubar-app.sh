@@ -23,9 +23,8 @@ if [ ! -x "$CLI" ]; then
   echo "  run: ./scripts/build.sh $CONFIGURATION"
   exit 1
 fi
-MLX_BUNDLE="$ROOT/.xcbuild/Build/Products/$CONFIGURATION/mlx-swift_Cmlx.bundle"
-if [ ! -d "$MLX_BUNDLE" ]; then
-  echo "x MLX Metal bundle not found at $MLX_BUNDLE"
+if [ ! -d "$ROOT/.xcbuild/Build/Products/$CONFIGURATION/mlx-swift_Cmlx.bundle" ]; then
+  echo "x MLX Metal bundle not found at $ROOT/.xcbuild/Build/Products/$CONFIGURATION/mlx-swift_Cmlx.bundle"
   echo "  run: ./scripts/build.sh $CONFIGURATION"
   exit 1
 fi
@@ -37,7 +36,9 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BINARY" "$APP/Contents/MacOS/Telemak"
 cp "$CLI" "$APP/Contents/Resources/telemak"
 cp "$BINARY" "$APP/Contents/Resources/telemak-menubar"
-cp -R "$MLX_BUNDLE" "$APP/Contents/Resources/mlx-swift_Cmlx.bundle"
+find "$ROOT/.xcbuild/Build/Products/$CONFIGURATION" -maxdepth 1 -name '*.bundle' -type d | while IFS= read -r bundle; do
+  cp -R "$bundle" "$APP/Contents/Resources/$(basename "$bundle")"
+done
 chmod 755 "$APP/Contents/MacOS/Telemak" "$APP/Contents/Resources/telemak" "$APP/Contents/Resources/telemak-menubar"
 
 VERSION="$(sed -n 's/^public let telemakVersion = "\(.*\)"/\1/p' "$ROOT/Sources/TelemakVersion/Version.swift")"

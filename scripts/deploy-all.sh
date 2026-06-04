@@ -56,7 +56,6 @@ done
 PRODUCTS="$ROOT/.xcbuild/Build/Products/$CONFIGURATION"
 LOCAL_TELEMAK="$PRODUCTS/telemak"
 LOCAL_MENUBAR="$PRODUCTS/telemak-menubar"
-LOCAL_MLX="$PRODUCTS/mlx-swift_Cmlx.bundle"
 LOCAL_APP="$ROOT/dist/Telemak.app"
 
 if [ "$SKIP_BUILD" = "0" ]; then
@@ -64,7 +63,7 @@ if [ "$SKIP_BUILD" = "0" ]; then
   "$ROOT/scripts/build-menubar-app.sh" "$CONFIGURATION"
 fi
 
-for required in "$LOCAL_TELEMAK" "$LOCAL_MENUBAR" "$LOCAL_MLX"; do
+for required in "$LOCAL_TELEMAK" "$LOCAL_MENUBAR" "$PRODUCTS/mlx-swift_Cmlx.bundle"; do
   if [ ! -e "$required" ]; then
     echo "missing build artifact: $required" >&2
     exit 1
@@ -93,7 +92,9 @@ deploy_one() {
   echo "deploy $name ($ip) -> $active_release"
   ssh -n -o BatchMode=yes "$ssh_target" "rm -rf '$remote_tmp' && mkdir -p '$remote_tmp'"
   scp -q "$LOCAL_TELEMAK" "$LOCAL_MENUBAR" "$ssh_target:$remote_tmp/"
-  scp -q -r "$LOCAL_MLX" "$ssh_target:$remote_tmp/mlx-swift_Cmlx.bundle"
+  find "$PRODUCTS" -maxdepth 1 -name '*.bundle' -type d | while IFS= read -r bundle; do
+    scp -q -r "$bundle" "$ssh_target:$remote_tmp/$(basename "$bundle")"
+  done
   if [ -d "$LOCAL_APP" ]; then
     scp -q -r "$LOCAL_APP" "$ssh_target:$remote_tmp/Telemak.app"
   fi
@@ -150,7 +151,11 @@ fi
 mkdir -p "$ACTIVE_RELEASE"
 cp -p "$REMOTE_TMP/telemak" "$ACTIVE_RELEASE/telemak"
 cp -p "$REMOTE_TMP/telemak-menubar" "$ACTIVE_RELEASE/telemak-menubar"
-cp -pR "$REMOTE_TMP/mlx-swift_Cmlx.bundle" "$ACTIVE_RELEASE/mlx-swift_Cmlx.bundle"
+find "$REMOTE_TMP" -maxdepth 1 -name '*.bundle' -type d | while IFS= read -r bundle; do
+  name="$(basename "$bundle")"
+  rm -rf "$ACTIVE_RELEASE/$name"
+  cp -pR "$bundle" "$ACTIVE_RELEASE/$name"
+done
 if [ -d "$REMOTE_TMP/Telemak.app" ]; then
   cp -pR "$REMOTE_TMP/Telemak.app" "$ACTIVE_RELEASE/Telemak.app"
 fi

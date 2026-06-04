@@ -265,7 +265,8 @@ public actor ModelRegistry {
                 underlying: "main model '\(mainId)' not loaded — pair draft after main"
             )
         }
-        let compatibility = Self.mtpCompatibility(for: draftId, isDraft: true)
+        let isEmbeddedDraft = draftId == mainId
+        let compatibility = Self.mtpCompatibility(for: draftId, isDraft: !isEmbeddedDraft)
         guard compatibility.canRun(allowUnverified: allowUnverified || Self.allowUnverifiedMTPFromEnvironment()) else {
             throw LoadError.loadFailed(underlying: compatibility.rejectedMessage(modelId: draftId))
         }
@@ -278,7 +279,7 @@ public actor ModelRegistry {
         }
         let model: MTPModelLoader.LoadedDraftModel
         do {
-            model = try MTPModelLoader.load(identifier: draftId)
+            model = try MTPModelLoader.load(identifier: draftId, embedded: isEmbeddedDraft)
         } catch {
             throw LoadError.loadFailed(underlying: "\(error)")
         }

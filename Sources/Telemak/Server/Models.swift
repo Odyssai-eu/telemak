@@ -211,8 +211,19 @@ struct ModelsHandler: Sendable {
                                   message: "could not load model '\(modelId)': \(error)")
             }
         }
-        // Optional draft pairing for MTP speculative decoding (V2).
-        if let draftId, !draftId.isEmpty {
+        // Optional draft pairing for MTP speculative decoding (V2). A verified
+        // embedded MTPLX artifact pairs the main model with itself; sidecars
+        // remain explicit via `draft_model`.
+        let autoDraftId: String?
+        if let explicit = draftId, !explicit.isEmpty {
+            autoDraftId = explicit
+        } else if let loaded = await registry.get(modelId), loaded.mtpCompatibility.autoEnabled {
+            autoDraftId = modelId
+        } else {
+            autoDraftId = nil
+        }
+
+        if let draftId = autoDraftId, !draftId.isEmpty {
             do {
                 _ = try await registry.loadDraft(
                     draftId,
@@ -239,7 +250,7 @@ struct ModelsHandler: Sendable {
         }
         await activity.finish(activityId)
         var payload: [String: String] = ["status": "loaded", "model": modelId]
-        if let draftId, !draftId.isEmpty {
+        if let draftId = autoDraftId, !draftId.isEmpty {
             payload["draft_model"] = draftId
         }
         let data = try JSONEncoder().encode(payload)
