@@ -244,6 +244,16 @@ public final class MTPTokenSampler {
     public var isGreedy: Bool { config.isGreedy }
 
     public func sample(logits: MLXArray) -> MTPSampledToken {
+        if isGreedy {
+            let tokenArray = MLX.argMax(logits, axis: -1).asType(.int32).reshaped(-1)
+            eval(tokenArray)
+            let token = Int(tokenArray.asArray(Int32.self).last ?? 0)
+            let vocabularySize = logits.shape.last ?? (token + 1)
+            return MTPSampledToken(
+                token: token,
+                distribution: .oneHot(token: token, vocabularySize: vocabularySize)
+            )
+        }
         let distribution = distribution(from: logits)
         let token = distribution.sample()
         return MTPSampledToken(token: token, distribution: distribution)

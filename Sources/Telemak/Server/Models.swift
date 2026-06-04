@@ -462,6 +462,7 @@ struct ModelsHandler: Sendable {
             let accepted: Int
             let acceptanceRate: Double
             let effectiveBlockSize: Int
+            let timing: [String: Double]
 
             switch draftEntry.model {
             case .qwen35(let draftModel):
@@ -487,6 +488,15 @@ struct ModelsHandler: Sendable {
                 accepted = iterator.totalAccepted
                 acceptanceRate = iterator.acceptanceRate
                 effectiveBlockSize = iterator.blockSize
+                timing = [
+                    "main_prefill_s": iterator.mainPrefillSeconds,
+                    "draft_prefill_s": iterator.draftPrefillSeconds,
+                    "draft_s": iterator.draftSeconds,
+                    "verify_s": iterator.verifySeconds,
+                    "acceptance_s": iterator.acceptanceSeconds,
+                    "rollback_s": iterator.rollbackSeconds,
+                    "draft_update_s": iterator.draftUpdateSeconds,
+                ]
 
             case .gemma4Assistant(let draftModel):
                 guard let gemma = ctx.model as? Gemma4Model else {
@@ -509,6 +519,7 @@ struct ModelsHandler: Sendable {
                 accepted = iterator.totalAccepted
                 acceptanceRate = iterator.acceptanceRate
                 effectiveBlockSize = iterator.blockSize
+                timing = [:]
             }
 
             let elapsed = Date().timeIntervalSince(start)
@@ -524,6 +535,7 @@ struct ModelsHandler: Sendable {
                 "elapsed_s": elapsed,
                 "tokens_per_sec": tps,
                 "block_size": effectiveBlockSize,
+                "timing": timing,
             ]
             let data = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data("{}".utf8)
             return Response(

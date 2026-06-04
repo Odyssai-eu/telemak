@@ -58,6 +58,13 @@ public final class MTPSpeculativeIterator {
     public private(set) var roundsRun: Int = 0
     public private(set) var totalProposed: Int = 0
     public private(set) var totalAccepted: Int = 0
+    public private(set) var mainPrefillSeconds: Double = 0
+    public private(set) var draftPrefillSeconds: Double = 0
+    public private(set) var draftSeconds: Double = 0
+    public private(set) var verifySeconds: Double = 0
+    public private(set) var acceptanceSeconds: Double = 0
+    public private(set) var rollbackSeconds: Double = 0
+    public private(set) var draftUpdateSeconds: Double = 0
     public var acceptanceRate: Double {
         guard totalProposed > 0 else { return 0 }
         return Double(totalAccepted) / Double(totalProposed)
@@ -96,7 +103,9 @@ public final class MTPSpeculativeIterator {
         //    at every position so the draft prefill can index into the
         //    hidden states.
         let promptArray = MLXArray(promptTokens.map { Int32($0) }, [1, promptTokens.count])
+        let mainPrefillStart = Date()
         let (logits, hidden) = main.forwardWithHidden(promptArray, cache: mainCache)
+        self.mainPrefillSeconds = Date().timeIntervalSince(mainPrefillStart)
 
         // 2. First bonus = sample of the last position's target logits.
         let lastLogits = logits[0..., (logits.shape[1] - 1) ..< logits.shape[1], 0...]
@@ -106,6 +115,7 @@ public final class MTPSpeculativeIterator {
         self.emitted = 0
 
         // 3. Prefill the draft from the same hidden states.
+        let draftPrefillStart = Date()
         draft.prefillFromTargetHidden(
             inputIds: promptArray,
             hidden: hidden,
@@ -113,6 +123,7 @@ public final class MTPSpeculativeIterator {
             cache: draftCache,
             sampler: sampler
         )
+        self.draftPrefillSeconds = Date().timeIntervalSince(draftPrefillStart)
     }
 
     public func next() -> Int? {
@@ -166,6 +177,7 @@ public final class MTPSpeculativeIterator {
         let bonusEmbedding = target.embed(MLXArray([Int32(bonusToken)], [1, 1]))
 
         // 1. Draft proposes blockSize - 1 candidates.
+        let draftStart = Date()
         let draftBlock = draft.draftBlock(
             lastBonus: bonusToken,
             hidden: bonusEmbedding,
@@ -173,6 +185,7 @@ public final class MTPSpeculativeIterator {
             blockSize: blockSize,
             sampler: sampler
         )
+        draftSeconds += Date().timeIntervalSince(draftStart)
         let draftTokens = draftBlock.tokens
         let nCandidates = draftTokens.shape[1]
 
@@ -182,14 +195,18 @@ public final class MTPSpeculativeIterator {
 
         // 3. Run target verify forward and capture rollback data for
         //    linear-attention SSM state.
+        let verifyStart = Date()
         let (logits, hidden, rollback) = main.targetVerify(verifyInput, cache: mainCache)
+        verifySeconds += Date().timeIntervalSince(verifyStart)
         // logits shape: [1, nCandidates + 1, vocab]
         // hidden shape: [1, nCandidates + 1, hidden_dim]
 
         // 4. Acceptance walk.
+        let acceptanceStart = Date()
         let acceptance = sampler.isGreedy
             ? greedyAcceptance(logits: logits, draftTokens: draftTokens, nCandidates: nCandidates)
             : samplingAcceptance(logits: logits, draftSamples: draftBlock.samples, nCandidates: nCandidates)
+        acceptanceSeconds += Date().timeIntervalSince(acceptanceStart)
         let accepted = acceptance.accepted
         let newTokens = acceptance.newTokens
         let newBonus = acceptance.newBonus
@@ -200,11 +217,13 @@ public final class MTPSpeculativeIterator {
         //    candidates. The new bonus is a prediction, not part of cache yet.
         let rejected = nCandidates - accepted
         if rejected > 0 {
+            let rollbackStart = Date()
             main.rollbackSpeculativeCache(
                 cache: mainCache,
                 rollbackBuffer: rollback,
                 acceptedCount: accepted + 1
             )
+            rollbackSeconds += Date().timeIntervalSince(rollbackStart)
         }
         // If rejected == 0, the verify forward already advanced the
         // cache by `nCandidates + 1` which is exactly what we want.
@@ -212,6 +231,7 @@ public final class MTPSpeculativeIterator {
         // 6. Update draft cache : trim back to acceptedCount + 1
         //    correct positions, then push the (acceptedCount + bonus)
         //    new positions.
+        let draftUpdateStart = Date()
         draft.acceptVerifiedTokens(
             verifyHidden: hidden,
             draftTokens: draftTokens,
@@ -220,6 +240,7 @@ public final class MTPSpeculativeIterator {
             cache: draftCache,
             sampler: sampler
         )
+        draftUpdateSeconds += Date().timeIntervalSince(draftUpdateStart)
 
         // 7. Push yielded tokens into pending ; track stats.
         pending.append(contentsOf: newTokens)
@@ -235,7 +256,8 @@ public final class MTPSpeculativeIterator {
         let newBonus: Int
     }
 
-    /// Greedy acceptance keeps the old vectorized argmax fast path.
+    /// Greedy acceptance keeps the vectorized argmax path. On MLX this is
+    /// where the lazy target verify graph is usually evaluated.
     private func greedyAcceptance(
         logits: MLXArray,
         draftTokens: MLXArray,
