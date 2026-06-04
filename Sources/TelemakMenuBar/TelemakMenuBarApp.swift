@@ -42,6 +42,40 @@ struct TelemakMenuBarApp: App {
     }
 }
 
+@MainActor
+final class MonitorWindowController {
+    static let shared = MonitorWindowController()
+
+    private var panel: NSPanel?
+
+    private init() {}
+
+    func show(poller: HealthPoller, settings: Settings) {
+        let content = MonitorWindow(poller: poller, settings: settings)
+        if panel == nil {
+            let panel = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 380, height: 310),
+                styleMask: [.titled, .closable, .resizable, .utilityWindow, .fullSizeContentView],
+                backing: .buffered,
+                defer: false
+            )
+            panel.title = "Telemak Monitor"
+            panel.isFloatingPanel = true
+            panel.level = .floating
+            panel.hidesOnDeactivate = false
+            panel.isMovableByWindowBackground = true
+            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            panel.minSize = NSSize(width: 320, height: 240)
+            panel.setFrameAutosaveName("TelemakMonitorWindow")
+            self.panel = panel
+        }
+
+        panel?.contentViewController = NSHostingController(rootView: content)
+        panel?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
 private struct TelemakStatusIcon: View {
     let isUp: Bool
 
@@ -111,6 +145,91 @@ private struct TelemakGlyph: Shape {
         ].forEach { path.addRect(scaledRect(x: $0.0, y: $0.1, width: $0.2, height: $0.3)) }
 
         return path
+    }
+}
+
+struct MonitorWindow: View {
+    @ObservedObject var poller: HealthPoller
+    @ObservedObject var settings: Settings
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                TelemakStatusIcon(isUp: poller.isUp)
+                    .frame(width: 22, height: 22)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Telemak")
+                        .font(.headline)
+                    Text(versionLine)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                Spacer()
+                Text(poller.currentPhase)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(poller.activeRequests > 0 ? .green : .secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(.quaternary))
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                monitorRow("Endpoint", settings.endpoint)
+                monitorRow("Status", poller.status)
+                monitorRow("Active", "\(poller.activeRequests)")
+                monitorRow("Current", poller.currentModel ?? "—")
+                monitorRow("Tokens", "\(poller.currentGeneratedTokens)")
+                monitorRow("Current speed", poller.currentTokPerSec.map { String(format: "%.1f tok/s", $0) } ?? "—")
+                monitorRow("Recent speed", poller.avgTokPerSec.map { String(format: "%.1f tok/s", $0) } ?? "—")
+                monitorRow("Requests", "\(poller.requestsServed)")
+                monitorRow("Memory", String(format: "%.1f GB used · %.1f GB free", poller.memoryUsedGB, poller.memoryFreeGB))
+                monitorRow("Uptime", formatUptime(poller.uptimeSeconds))
+            }
+
+            if let runtimeLastError = poller.runtimeLastError {
+                Text(runtimeLastError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+        .frame(minWidth: 320, minHeight: 240)
+        .background(.regularMaterial)
+    }
+
+    private var versionLine: String {
+        if let runtimeVersion = poller.runtimeVersion {
+            return "Menubar v\(telemakVersion) · Runtime v\(runtimeVersion)"
+        }
+        return "Menubar v\(telemakVersion)"
+    }
+
+    private func monitorRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 86, alignment: .leading)
+            Text(value)
+                .font(.system(.body, design: label == "Current" ? .monospaced : .default))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func formatUptime(_ seconds: Double) -> String {
+        let s = Int(seconds)
+        if s < 60 { return "\(s)s" }
+        if s < 3600 { return "\(s / 60)m \(s % 60)s" }
+        return "\(s / 3600)h \((s % 3600) / 60)m"
     }
 }
 
@@ -497,6 +616,11 @@ struct MenuBarPopover: View {
             HStack(spacing: 8) {
                 Button(action: openDashboard) {
                     Label("Dashboard", systemImage: "rectangle.on.rectangle")
+                }
+                Button {
+                    MonitorWindowController.shared.show(poller: poller, settings: settings)
+                } label: {
+                    Label("Monitor", systemImage: "macwindow")
                 }
                 Button {
                     openWindow(id: "telemak-settings")
