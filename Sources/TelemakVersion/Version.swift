@@ -1,1 +1,1 @@
-public let telemakVersion = "0.6.46"
+public let telemakVersion = "0.6.47"

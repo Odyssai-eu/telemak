@@ -90,6 +90,10 @@ MENUBAR="$DERIVED/Build/Products/$CONFIGURATION/telemak-menubar"
 if [ -x "$MENUBAR" ]; then
   echo "✓ built $MENUBAR"
 fi
+MONITOR="$DERIVED/Build/Products/$CONFIGURATION/telemak-monitor"
+if [ -x "$MONITOR" ]; then
+  echo "✓ built $MONITOR"
+fi
 
 # Sign Release builds with a stable code-signing identity so macOS TCC
 # (Full Disk Access / removable disks) remembers the grant across
@@ -115,6 +119,9 @@ if [ "$CONFIGURATION" = "Release" ]; then
     codesign --sign "$IDENTITY" --force --options runtime "$BINARY"
     if [ -x "$MENUBAR" ]; then
       codesign --sign "$IDENTITY" --force --options runtime "$MENUBAR"
+    fi
+    if [ -x "$MONITOR" ]; then
+      codesign --sign "$IDENTITY" --force --options runtime "$MONITOR"
     fi
     echo "✓ signed (cdhash will stay stable across rebuilds)"
   else

@@ -11,6 +11,7 @@ let package = Package(
         .library(name: "TelemakMTP", targets: ["TelemakMTP"]),
         .executable(name: "telemak", targets: ["Telemak"]),
         .executable(name: "telemak-menubar", targets: ["TelemakMenuBar"]),
+        .executable(name: "telemak-monitor", targets: ["TelemakMonitor"]),
     ],
     dependencies: [
         // Odyssai-eu fork — adds Qwen35 hidden-state access plus
@@ -51,6 +52,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "TelemakMenuBar",
+            dependencies: ["TelemakVersion"]
+        ),
+        .executableTarget(
+            name: "TelemakMonitor",
             dependencies: ["TelemakVersion"]
         ),
         .testTarget(
