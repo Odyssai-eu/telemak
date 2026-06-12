@@ -10,6 +10,37 @@ struct TelemakMenuBarApp: App {
     @StateObject private var poller: HealthPoller
 
     init() {
+        // ── Headless provisioning ──────────────────────────────────────
+        // `Telemak --provision [--models-dir PATH]` runs the full install
+        // (CLI + runtime bundles + LaunchAgents) with NO UI and exits.
+        // This is how the OdyssAI Configurator drives Telemak end-to-end:
+        // one installer for the whole family — Telemak's own first-run
+        // window remains only as the standalone fallback.
+        let args = CommandLine.arguments
+        if args.contains("--provision") {
+            var modelsDir = TelemakInstaller.defaultModelsDir()
+            if let i = args.firstIndex(of: "--models-dir"), i + 1 < args.count {
+                modelsDir = URL(fileURLWithPath: args[i + 1], isDirectory: true)
+            }
+            do {
+                let log = try TelemakInstaller.install(modelsDir: modelsDir)
+                log.forEach { print("[telemak-provision] \($0)") }
+                // Detached: init() runs on the main actor and we park the
+                // main thread below — an actor-inherited Task would deadlock.
+                Task.detached {
+                    let ok = await TelemakInstaller.waitForInstallSmoke(timeoutSeconds: 60)
+                    print(ok ? "[telemak-provision] smoke OK — serving on :8003"
+                             : "[telemak-provision] WARNING: smoke checks did not pass within 60 s")
+                    exit(ok ? 0 : 2)
+                }
+                DispatchSemaphore(value: 0).wait()   // parked until the task exits the process
+            } catch {
+                FileHandle.standardError.write(
+                    Data("[telemak-provision] ERROR: \(error)\n".utf8))
+                exit(1)
+            }
+        }
+
         let s = Settings()
         _settings = StateObject(wrappedValue: s)
         _poller = StateObject(wrappedValue: HealthPoller(settings: s))

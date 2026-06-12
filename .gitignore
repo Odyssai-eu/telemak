@@ -24,3 +24,5 @@ scripts/telemak-hosts.local.sh
 .xcbuild/
 *.profraw
 dist/
+
+graphify-out/
