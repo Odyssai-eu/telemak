@@ -458,7 +458,65 @@ either resolve or dispatch to the operator.
   `[[http-api-contract]]`, `[[topology-yaml]]`, `[[http-proxy]]`,
   `[[mtp-speculative-decoding]]`.
 
-## 11. Concrete onboarding steps for a fresh agent
+## 11. Memory (claude-memory — shared KB)
+
+This project is linked to the **shared claude-memory knowledge base** at
+`~/Claude/code/shared-memory/` (138+ articles, 50+ daily logs).
+The local `.claude-memory` is a symlink to that KB; hooks
+`SessionStart` / `PreCompact` / `SessionEnd` are wired in
+`.claude/settings.json` next to the graphify `PreToolUse` hooks.
+
+### What you get for free
+
+- **SessionStart** injects the KB index (current concepts) into every
+  conversation. The next 5 lines of `session-start.py` output is
+  the live state of the shared KB at session-open time.
+- **PreCompact** runs before context window fills, flushing the
+  current conversation's wisdom to `daily/YYYY-MM-DD.md` via
+  `flush.py` (uses the Claude Agent SDK, no extra API key).
+- **SessionEnd** finalizes the flush and (if after 18h) triggers
+  `compile.py` to roll daily logs into atomic concept articles.
+
+### When to query the KB explicitly
+
+Before answering **architecture / "how does it fit"** questions about
+Telemak, Odysseus, Companion, the cluster, the inference engines
+(Inferencer / EXO / MLX-LM / mlx-swift-lm), sampling profiles, RDMA
+topology, or the Conversational Memory stack, **run a query first**:
+
+```bash
+# From inside Telemak
+uv run --directory .claude-memory python scripts/query.py "your question"
+# Or query the index directly for a quick skim
+less ~/Claude/code/shared-memory/knowledge/index.md
+```
+
+Don't grep the repo for high-level "why" answers — the KB has them
+already, and the daily logs catch context that doesn't make it into
+a concept article.
+
+### When NOT to query
+
+- Source-code specifics (read the code).
+- Issue/PR state on this repo (Forgejo).
+- Live runtime state (curl the host).
+
+### How to write a good flushable concept
+
+If you learn something that future sessions would benefit from
+(non-obvious bug, design constraint, work-around, infra quirk), make
+it a concept. Either:
+
+- Drop a one-liner in `daily/YYYY-MM-DD.md` (the flush will lift it), or
+- Write a concept article directly in
+  `~/Claude/code/shared-memory/knowledge/concepts/<slug>.md` with a
+  clear summary, the "why", and 2-3 cross-references to other
+  concepts.
+
+Cross-repo concepts that touch Telemak live in the shared KB, **not**
+in `docs/` — `docs/` is for Telemak-internal operator documentation.
+
+## 12. Concrete onboarding steps for a fresh agent
 
 If you've never seen this repo before, do this in order :
 
@@ -478,7 +536,7 @@ If you've never seen this repo before, do this in order :
 
 After that, you're ready to pick an issue.
 
-## 12. Don't
+## 13. Don't
 
 - Don't `swift build` — use `./scripts/build.sh`.
 - Don't deploy without codesigning (Release builds, see §3).
@@ -491,7 +549,7 @@ After that, you're ready to pick an issue.
 - Don't leave the deployed runtime broken — revert the commit if smoke
   fails, ship a follow-up.
 
-## 13. When you're done with an issue
+## 14. When you're done with an issue
 
 Comment on the issue :
 
