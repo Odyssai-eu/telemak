@@ -53,10 +53,12 @@ struct HealthHandler: Sendable {
     /// and subtract MLX usage. If sysctl unavailable, returns 0 (caller can
     /// detect by checking against system memory).
     private func wiredMemoryFreeGB(usedGB: Double) -> Double {
-        guard let wiredLimitMB = sysctlInt("iogpu.wired_limit_mb"), wiredLimitMB > 0 else {
-            return 0
+        let limitGB: Double
+        if let wiredLimitMB = sysctlInt("iogpu.wired_limit_mb"), wiredLimitMB > 0 {
+            limitGB = Double(wiredLimitMB) / 1024.0
+        } else {
+            limitGB = bytesToGB(RamBudget.ceilingBytes())
         }
-        let limitGB = Double(wiredLimitMB) / 1024.0
         return max(0, limitGB - usedGB)
     }
 
