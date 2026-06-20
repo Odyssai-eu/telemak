@@ -17,7 +17,15 @@ line edits — see Approach for the real new-code surface.
    the `norm(h)` at the end of `HYV3ModelInner.callAsFunction`). Telemak's working Qwen3.5 path feeds
    **POST**-norm (`Qwen35.swift:698`, surfaced by `forwardWithHidden:772`). Until this is resolved,
    step 3's `forwardWithHidden` is undefined. This is the acceptance-determining unknown (the EAGLE
-   failure).
+   failure). **RESOLVED (vLLM `hy_v3_mtp.py`, the canonical impl; cross-checked vLLM/SGLang DeepSeek +
+   Qwen3-Next + the DSV3 paper):**
+   - **PRE-norm hidden** — the head consumes the trunk's last-decoder-layer hidden BEFORE `HYV3ModelInner.norm`
+     (the head's own `hnorm` re-norms it; `model.norm` is only the shared-head logit-time norm). So Hy3's
+     `forwardWithHidden`/`targetVerify` must return the **pre-`norm`** hidden (NOT post, unlike the Qwen35 path).
+   - **Concat embedding-FIRST**: `eh_proj(cat[enorm(embed), hnorm(hidden)], axis=-1)`. Reversing it loads
+     fine but silently tanks acceptance (wrong weight columns).
+   - **The MTP head has its OWN `final_layernorm`** before the shared (no-op-norm) `lm_head` — block → `final_layernorm` → shared `lm_head`. Do NOT add a second norm.
+   - **`embed_tokens` + `lm_head` are SHARED with the trunk**; the MTP input is the NEXT token's embedding.
 1. **Extract + convert the MTP head → sidecar.** The head at `model.layers.80` in `tencent/Hy3-preview`
    (VERIFIED present: HTTP 200, full MoE layer — `eh_proj`, `enorm`, `hnorm`, `self_attn.*`+`q/k_norm`,
    `mlp.{router.gate, experts.0..191.{gate,up,down}_proj, shared_mlp.*, expert_bias}`, the three norms)
