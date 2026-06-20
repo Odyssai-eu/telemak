@@ -16,7 +16,7 @@ import MLXNN
 /// Reference: vLLM `hy_v3_mtp.py` / the fork `HYV3.swift` (the trunk this mirrors).
 
 /// Config fields the Hy3 MTP head + layer need (from the sidecar `config.json`).
-struct HYV3MTPFields {
+public struct HYV3MTPFields: Sendable {
     var hiddenSize: Int
     var moeIntermediateSize: Int
     var numAttentionHeads: Int

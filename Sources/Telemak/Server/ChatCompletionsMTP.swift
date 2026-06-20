@@ -427,6 +427,31 @@ extension ChatCompletionsHandler {
             acceptance = iterator.acceptanceRate
             accepted = iterator.totalAccepted
             proposed = iterator.totalProposed
+
+        case .hyv3(let draftModel):
+            guard let hyv3 = ctx.model as? any HYV3HiddenStateProvider else {
+                throw HTTPError(.badRequest,
+                                message: "main model is not Hy3 (\(type(of: ctx.model))); HYV3 MTP unsupported")
+            }
+            let iterator = HYV3MTPSpeculativeIterator(
+                main: hyv3, draft: draftModel,
+                promptTokens: promptTokens, maxTokens: maxTokens,
+                blockSize: nil, parameters: params
+            )
+            while let tok = iterator.next() {
+                generated.append(tok)
+                let decoded = ctx.tokenizer.decode(tokenIds: generated)
+                let delta = String(decoded.dropFirst(lastDecoded.count))
+                if !delta.isEmpty {
+                    let visible = stopChecker.feed(delta)
+                    if !visible.isEmpty { pieces.append(visible) }
+                    lastDecoded = decoded
+                }
+                if stopChecker.hit { break }
+            }
+            acceptance = iterator.acceptanceRate
+            accepted = iterator.totalAccepted
+            proposed = iterator.totalProposed
         }
 
         if !stopChecker.hit {

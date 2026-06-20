@@ -191,6 +191,7 @@ struct ModelsHandler: Sendable {
                 let forceLLM = body.force_llm ?? draftId.map {
                     let draftType = ModelLoader.modelType(identifier: $0)
                     return draftType == "gemma4_assistant" || draftType == "qwen3_5_mtp"
+                        || draftType == "hy_v3_mtp"
                 } ?? false
                 _ = try await registry.load(modelId, forceLLM: forceLLM)
             } catch ModelRegistry.LoadError.insufficientMemory(let needed, let available, let ceiling, let currentlyLoaded) {
@@ -520,6 +521,33 @@ struct ModelsHandler: Sendable {
                 acceptanceRate = iterator.acceptanceRate
                 effectiveBlockSize = iterator.blockSize
                 timing = [:]
+
+            case .hyv3(let draftModel):
+                guard let hyv3 = ctx.model as? any HYV3HiddenStateProvider else {
+                    throw HTTPError(.badRequest,
+                                    message: "main model is not Hy3 (\(type(of: ctx.model))); HYV3 MTP unsupported")
+                }
+                let iterator = HYV3MTPSpeculativeIterator(
+                    main: hyv3,
+                    draft: draftModel,
+                    promptTokens: promptTokens,
+                    maxTokens: maxTok,
+                    blockSize: blockSize,
+                    parameters: parameters
+                )
+                while let tok = iterator.next() {
+                    generated.append(tok)
+                }
+                rounds = iterator.roundsRun
+                proposed = iterator.totalProposed
+                accepted = iterator.totalAccepted
+                acceptanceRate = iterator.acceptanceRate
+                effectiveBlockSize = iterator.blockSize
+                timing = [
+                    "main_prefill_s": iterator.mainPrefillSeconds,
+                    "draft_s": iterator.draftSeconds,
+                    "verify_s": iterator.verifySeconds,
+                ]
             }
 
             let elapsed = Date().timeIntervalSince(start)

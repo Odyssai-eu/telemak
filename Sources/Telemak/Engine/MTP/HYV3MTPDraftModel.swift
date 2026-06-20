@@ -20,7 +20,7 @@ import TelemakMTP
 ///
 /// Concat order is embedding-FIRST (`eh_proj(cat[enorm(embed), hnorm(hidden)])`),
 /// and the head consumes the trunk's PRE-norm hidden (see `HYV3MTP.swift` ABI).
-public final class HYV3MTPDraftModel: Module, @unchecked Sendable {
+public final class HYV3MTPDraftModel: Module, BaseLanguageModel, @unchecked Sendable {
 
     public let config: HYV3MTPConfiguration
     public let blockSize: Int

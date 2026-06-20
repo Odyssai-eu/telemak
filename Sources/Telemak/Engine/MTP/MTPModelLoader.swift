@@ -26,6 +26,7 @@ public enum MTPModelLoader {
     public enum LoadedDraftModel: @unchecked Sendable {
         case qwen35(Qwen35MTPDraftModel)
         case gemma4Assistant(Gemma4AssistantModel)
+        case hyv3(HYV3MTPDraftModel)
     }
 
     public enum LoadError: Error, CustomStringConvertible {
@@ -83,6 +84,8 @@ public enum MTPModelLoader {
             return .qwen35(try loadQwen35MTP(staged: staged, configData: configData))
         case "gemma4_assistant":
             return .gemma4Assistant(try loadGemma4Assistant(staged: staged, configData: configData))
+        case "hy_v3_mtp":
+            return .hyv3(try loadHYV3MTP(staged: staged, configData: configData))
         default:
             throw LoadError.wrongModelType(dir: staged.path, gotType: modelType)
         }
@@ -177,6 +180,34 @@ public enum MTPModelLoader {
         }
         try ensureSafetensors(in: staged)
         let model = Qwen35MTPDraftModel(mtpConfig)
+        do {
+            try loadWeights(
+                modelDirectory: staged,
+                model: model,
+                perLayerQuantization: baseConfig.perLayerQuantization
+            )
+        } catch {
+            throw LoadError.weightLoadFailed(underlying: "\(error)")
+        }
+        return model
+    }
+
+    private static func loadHYV3MTP(staged: URL, configData: Data) throws -> HYV3MTPDraftModel {
+        let decoder = JSONDecoder()
+        let mtpConfig: HYV3MTPConfiguration
+        do {
+            mtpConfig = try decoder.decode(HYV3MTPConfiguration.self, from: configData)
+        } catch {
+            throw LoadError.configDecodeFailed(dir: staged.path, underlying: "\(error)")
+        }
+        let baseConfig: BaseConfiguration
+        do {
+            baseConfig = try decoder.decode(BaseConfiguration.self, from: configData)
+        } catch {
+            throw LoadError.configDecodeFailed(dir: staged.path, underlying: "\(error)")
+        }
+        try ensureSafetensors(in: staged)
+        let model = HYV3MTPDraftModel(mtpConfig)
         do {
             try loadWeights(
                 modelDirectory: staged,
