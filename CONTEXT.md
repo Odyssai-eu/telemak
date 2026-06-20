@@ -5,7 +5,11 @@ Telemak. Glossary only — no implementation details (those live in PLAN.md / th
 
 - **MTP head (draft head)** — a small module bundled *inside* a model's own checkpoint that
   predicts the next token from the main model's hidden state. Used as the **drafter** in
-  speculative decoding, so no separate/external draft model is needed.
+  speculative decoding, so no separate/external draft model is needed. **Its numeric precision
+  (quantization) is a speed↔acceptance knob, NOT a quality knob:** a lower-precision head proposes
+  less accurately → lower *acceptance* (less speedup) → but never wrong output, because the trunk
+  *verifies* every proposed token. So the head can be quantized aggressively for speed; the only
+  cost is acceptance.
 
 - **Trunk** — the main model (the full Hy3), as opposed to its MTP head.
 

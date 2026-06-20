@@ -122,6 +122,9 @@ public final class HYV3MTPSpeculativeIterator {
         // Hy3: one forward covers verify; no SSM capture buffer.
         let verifyStart = Date()
         let (logits, hidden) = main.forwardWithHidden(verifyInput, cache: mainCache)
+        // Force the verify compute synchronously: bounds the lazy graph across rounds
+        // and makes verify_s a real (not graph-build) number.
+        eval(logits, hidden)
         verifySeconds += Date().timeIntervalSince(verifyStart)
 
         let acceptance = sampler.isGreedy
