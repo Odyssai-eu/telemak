@@ -37,7 +37,7 @@ For that 80%, Telemak gives you :
 
 - **Zero install friction.** No Python 3.11. No `mlx + mlx-lm` venv. No `bootstrap-node.sh`. No Docker. A binary you drop and run.
 - **Native performance.** mlx-swift uses Metal directly. No Python/asyncio/multiprocessing overhead. Lower TTFT for small models.
-- **One process, full control.** We own the codebase — no inherited defaults to fight (the oMLX `hot_cache_max_size:"0"` / `enable_thinking:true` gotchas don't exist here).
+- **One process, full control.** We own the codebase — no inherited server defaults to fight (no third-party cache/thinking toggles silently flipped against you).
 - **Same API surface.** OpenAI `/v1/chat/completions`, Anthropic `/v1/messages`. Any client that speaks those (Companion, IDE agents, the SDKs) hits Telemak unchanged.
 
 ## The lineage
