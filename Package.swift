@@ -61,6 +61,7 @@ let package = Package(
         .testTarget(
             name: "TelemakTests",
             dependencies: [
+                "TelemakVersion",
                 "TelemakMTP",
                 .product(name: "HummingbirdTesting", package: "hummingbird"),
             ]

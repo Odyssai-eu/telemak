@@ -1,4 +1,5 @@
 import Foundation
+import TelemakVersion
 import Hummingbird
 import MLX
 import MLXLLM
@@ -32,6 +33,12 @@ struct ModelsHandler: Sendable {
         }
         router.post("/admin/mtp/smoke") { request, _ async throws -> Response in
             try await self.mtpSmoke(request)
+        }
+        router.post("/admin/models-dir") { request, _ async throws -> Response in
+            try await self.setModelsDir(request)
+        }
+        router.get("/admin/models-dir") { _, _ async throws -> Response in
+            self.getModelsDir()
         }
     }
 
@@ -102,10 +109,87 @@ struct ModelsHandler: Sendable {
     private func available() -> Response {
         struct Payload: Encodable {
             let models: [AvailableModels.Entry]
+            // true when no models directory is configured (config.json + env both
+            // absent) so clients show "set your models directory" instead of a
+            // silent empty list.
+            let models_dir_unset: Bool
         }
         let entries = AvailableModels.scan()
-        let payload = Payload(models: entries)
-        let data = (try? JSONEncoder().encode(payload)) ?? Data(#"{"models":[]}"#.utf8)
+        let payload = Payload(models: entries,
+                              models_dir_unset: ModelsConfig.shared.effectiveDir() == nil)
+        let data = (try? JSONEncoder().encode(payload))
+            ?? Data(#"{"models":[],"models_dir_unset":true}"#.utf8)
+        return jsonResponse(.ok, data: data)
+    }
+
+    // MARK: - GET /admin/models-dir
+
+    /// Reports the effective models directory + where it came from, so the
+    /// menubar can show it (read-only when `managed`, editable when standalone).
+    private func getModelsDir() -> Response {
+        struct Payload: Encodable {
+            let dir: String?
+            let source: String   // "config" | "env" | "unset"
+            let managed: Bool
+        }
+        let snap = ModelsConfig.shared.snapshot()
+        let payload = Payload(dir: snap.dir, source: snap.source, managed: snap.managed)
+        let data = (try? JSONEncoder().encode(payload))
+            ?? Data(#"{"dir":null,"source":"unset","managed":false}"#.utf8)
+        return jsonResponse(.ok, data: data)
+    }
+
+    // MARK: - POST /admin/models-dir
+
+    /// Set the models directory (master = OdyssAI-X, or the standalone menubar).
+    /// Validates the path; with `create:true` it `mkdir -p`s a missing dir, else
+    /// returns 409 so the caller can offer to create. Persists to config.json +
+    /// recomputes the cached resolver. Loaded models are NOT unloaded — only
+    /// discovery + future loads use the new dir.
+    private func setModelsDir(_ request: Request) async throws -> Response {
+        struct Body: Decodable {
+            let dir: String
+            let create: Bool?
+            let managed: Bool?
+        }
+        let buf = try await request.body.collect(upTo: 1 << 16)
+        let body: Body
+        do {
+            body = try JSONDecoder().decode(Body.self, from: Data(buffer: buf))
+        } catch {
+            return jsonError(.badRequest, code: "invalid_request_error",
+                              message: "expected {\"dir\": \"<path>\", \"create\": <bool?>, \"managed\": <bool?>}: \(error)")
+        }
+        let dir = body.dir.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !dir.isEmpty else {
+            return jsonError(.badRequest, code: "invalid_request_error", message: "dir must not be empty")
+        }
+        var isDir: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: dir, isDirectory: &isDir)
+        if !exists {
+            if body.create == true {
+                do {
+                    try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+                } catch {
+                    return jsonError(.badRequest, code: "create_failed",
+                                      message: "could not create directory '\(dir)': \(error)")
+                }
+            } else {
+                return jsonError(.conflict, code: "not_found",
+                                  message: "directory '\(dir)' does not exist (pass create:true to create it)")
+            }
+        } else if !isDir.boolValue {
+            return jsonError(.badRequest, code: "not_a_directory", message: "'\(dir)' is not a directory")
+        }
+        do {
+            try ModelsConfig.shared.set(dir: dir, managed: body.managed ?? false)
+        } catch {
+            return jsonError(.internalServerError, code: "persist_failed",
+                              message: "could not persist models directory: \(error)")
+        }
+        let snap = ModelsConfig.shared.snapshot()
+        let payload: [String: String] = ["status": "ok", "dir": snap.dir ?? ""]
+        let data = try JSONEncoder().encode(payload)
         return jsonResponse(.ok, data: data)
     }
 
@@ -324,7 +408,7 @@ struct ModelsHandler: Sendable {
         // Validate output — must resolve under TELEMAK_MODELS_DIR or ~/.telemak.
         if let out = body.output, !out.isEmpty {
             let rootPaths: [String]
-            if let modelsDir = ProcessInfo.processInfo.environment["TELEMAK_MODELS_DIR"] {
+            if let modelsDir = ModelsConfig.shared.effectiveDir() {
                 rootPaths = [URL(fileURLWithPath: modelsDir).standardized.path]
             } else {
                 let home = FileManager.default.homeDirectoryForCurrentUser

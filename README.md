@@ -61,8 +61,9 @@ License : Apache 2.0 (planned, matches the rest of the OdyssAI stack).
 # Build (requires Metal Toolchain: xcodebuild -downloadComponent MetalToolchain)
 ./scripts/build.sh Release
 
-# Run
-TELEMAK_MODELS_DIR=/Volumes/models/odysseus \
+# Run (TELEMAK_MODELS_DIR is the legacy quick-start way; in production the dir
+# comes from ~/.telemak/config.json, set by OdyssAI-X or the menubar/installer)
+TELEMAK_MODELS_DIR=~/models \
   ./scripts/run.sh serve --host 0.0.0.0 --port 8003
 
 # Load + chat (in another terminal)
@@ -113,7 +114,7 @@ This is one-time per machine. The `telemak` CLI binary doesn't trip Gatekeeper (
 
 | Env var | Purpose | Default |
 |---|---|---|
-| `TELEMAK_MODELS_DIR` | Odysseus-style models directory (`<root>/<org>/<name>/snapshots/<hash>/`) | unset → HF cache only |
+| `TELEMAK_MODELS_DIR` | **Legacy/fallback** models directory (`<root>/<org>/<name>/`). Superseded by `~/.telemak/config.json` (set by OdyssAI-X, the menubar, or the installer); used only when no config.json exists. | unset → config.json, else prompt |
 | `HF_HUB_CACHE` | HuggingFace cache path | `~/.cache/huggingface/hub/` |
 | `TELEMAK_API_KEY` | Optional bearer token for `/admin/*`; inference endpoints stay open for LAN routing | unset → open |
 | `TELEMAK_CORS_ORIGIN` | `Access-Control-Allow-Origin` value | `*` |

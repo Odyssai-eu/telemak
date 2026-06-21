@@ -1,4 +1,5 @@
 import Foundation
+import TelemakVersion
 import HuggingFace
 import MLXEmbedders
 import MLXHuggingFace
@@ -72,7 +73,7 @@ public enum EmbedderLoader {
         if identifier.hasPrefix("/") {
             return ModelLoader.resolveDirectory(at: identifier)
         }
-        if let modelsDir = ProcessInfo.processInfo.environment["TELEMAK_MODELS_DIR"],
+        if let modelsDir = ModelsConfig.shared.effectiveDir(),
            let url = ModelLoader.resolveModelsDir(modelsDir, id: identifier) {
             return url
         }

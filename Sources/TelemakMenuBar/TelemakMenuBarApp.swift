@@ -18,9 +18,16 @@ struct TelemakMenuBarApp: App {
         // window remains only as the standalone fallback.
         let args = CommandLine.arguments
         if args.contains("--provision") {
-            var modelsDir = TelemakInstaller.defaultModelsDir()
+            var modelsDir: URL? = TelemakInstaller.defaultModelsDir()
             if let i = args.firstIndex(of: "--models-dir"), i + 1 < args.count {
                 modelsDir = URL(fileURLWithPath: args[i + 1], isDirectory: true)
+            }
+            // The Configurator (OdyssAI-X) must pass --models-dir, or a prior
+            // config.json/env must exist. No default — abort otherwise.
+            guard let modelsDir, !modelsDir.path.isEmpty else {
+                FileHandle.standardError.write(
+                    Data("[telemak-provision] ERROR: --models-dir is required when provisioning (no models directory configured)\n".utf8))
+                exit(1)
             }
             do {
                 let log = try TelemakInstaller.install(modelsDir: modelsDir)
@@ -104,6 +111,189 @@ final class MonitorWindowController {
         panel?.contentViewController = NSHostingController(rootView: content)
         panel?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+// MARK: - Models window (picker + directory + local load)
+
+@MainActor
+final class ModelsWindowController {
+    static let shared = ModelsWindowController()
+    private var panel: NSPanel?
+    private init() {}
+
+    func show(poller: HealthPoller, settings: Settings) {
+        let content = ModelsWindow(poller: poller, settings: settings)
+        if panel == nil {
+            let panel = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 440, height: 440),
+                styleMask: [.titled, .closable, .resizable, .utilityWindow, .fullSizeContentView],
+                backing: .buffered,
+                defer: false
+            )
+            panel.title = "Telemak Models"
+            panel.isFloatingPanel = true
+            panel.level = .floating
+            panel.hidesOnDeactivate = false
+            panel.isMovableByWindowBackground = true
+            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            panel.minSize = NSSize(width: 400, height: 340)
+            panel.setFrameAutosaveName("TelemakModelsWindow")
+            self.panel = panel
+        }
+        panel?.contentViewController = NSHostingController(rootView: content)
+        panel?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+@MainActor
+final class ModelsWindowModel: ObservableObject {
+    @Published var available: [String] = []
+    @Published var modelsDirUnset = false
+    @Published var status: String = ""
+    @Published var dirField: String = ""
+    let settings: Settings
+
+    init(settings: Settings) {
+        self.settings = settings
+        Task { await refresh() }
+    }
+
+    private func authed(_ url: URL, method: String = "GET", body: Data? = nil) -> URLRequest {
+        var req = URLRequest(url: url)
+        req.httpMethod = method
+        req.timeoutInterval = 4
+        let key = settings.apiKey
+        if !key.isEmpty { req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
+        if let body {
+            req.httpBody = body
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        return req
+    }
+
+    func refresh() async {
+        guard let base = settings.endpointURL else { return }
+        do {
+            let (data, _) = try await URLSession.shared.data(
+                for: authed(base.appendingPathComponent("/admin/models/available")))
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+            available = ((json["models"] as? [[String: Any]])?.compactMap { $0["id"] as? String } ?? []).sorted()
+            modelsDirUnset = json["models_dir_unset"] as? Bool ?? false
+        } catch {
+            status = "Could not list models: \(error.localizedDescription)"
+        }
+    }
+
+    func load(_ id: String) async {
+        guard let base = settings.endpointURL else { return }
+        status = "Loading \(id)…"
+        let body = try? JSONSerialization.data(withJSONObject: ["model": id])
+        do {
+            let (_, resp) = try await URLSession.shared.data(
+                for: authed(base.appendingPathComponent("/admin/load"), method: "POST", body: body))
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+            status = code == 200 ? "Loaded \(id)" : "Load failed (HTTP \(code))"
+        } catch {
+            status = "Load failed: \(error.localizedDescription)"
+        }
+    }
+
+    func setDir(create: Bool) async {
+        guard let base = settings.endpointURL else { return }
+        let path = dirField.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty else { status = "Enter a directory path"; return }
+        let body = try? JSONSerialization.data(
+            withJSONObject: ["dir": path, "create": create, "managed": false])
+        do {
+            let (_, resp) = try await URLSession.shared.data(
+                for: authed(base.appendingPathComponent("/admin/models-dir"), method: "POST", body: body))
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+            if code == 200 { status = "Models directory set"; await refresh() }
+            else if code == 409 { status = "Directory doesn't exist — use “Create & set”." }
+            else { status = "Set failed (HTTP \(code))" }
+        } catch {
+            status = "Set failed: \(error.localizedDescription)"
+        }
+    }
+}
+
+struct ModelsWindow: View {
+    @ObservedObject var poller: HealthPoller
+    @StateObject private var model: ModelsWindowModel
+
+    init(poller: HealthPoller, settings: Settings) {
+        self.poller = poller
+        _model = StateObject(wrappedValue: ModelsWindowModel(settings: settings))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Models").font(.headline)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Models directory").font(.subheadline.weight(.semibold))
+                if poller.modelsDirManaged {
+                    HStack {
+                        Image(systemName: "lock.fill").foregroundColor(.secondary)
+                        Text(poller.modelsDir ?? "—")
+                            .font(.system(.body, design: .monospaced)).textSelection(.enabled)
+                            .lineLimit(1).truncationMode(.middle)
+                        Spacer()
+                        Text("managed by OdyssAI-X").font(.caption2).foregroundColor(.secondary)
+                    }
+                } else {
+                    HStack {
+                        TextField("/path/to/models", text: $model.dirField)
+                            .textFieldStyle(.roundedBorder)
+                        Button("Set") { Task { await model.setDir(create: false) } }
+                        Button("Create & set") { Task { await model.setDir(create: true) } }
+                    }
+                    Text("Standalone — set where models live on this Mac.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+            }
+
+            Divider()
+
+            Text("Available").font(.subheadline.weight(.semibold))
+            if model.modelsDirUnset {
+                Text("Set your models directory above to see available models.")
+                    .font(.callout).foregroundColor(.orange)
+            } else if model.available.isEmpty {
+                Text("No models found under the directory.")
+                    .font(.callout).foregroundColor(.secondary)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(model.available, id: \.self) { id in
+                            HStack {
+                                Text(id).font(.system(.caption, design: .monospaced))
+                                    .lineLimit(1).truncationMode(.middle)
+                                Spacer()
+                                if poller.modelsLoaded.contains(id) {
+                                    Text("loaded").font(.caption2).foregroundColor(.green)
+                                } else {
+                                    Button("Load") { Task { await model.load(id) } }
+                                        .controlSize(.small)
+                                }
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 180)
+            }
+
+            if !model.status.isEmpty {
+                Text(model.status).font(.caption).foregroundColor(.secondary).textSelection(.enabled)
+            }
+            Spacer(minLength: 0)
+            Button("Refresh") { Task { await model.refresh() } }
+        }
+        .padding(16)
+        .frame(minWidth: 400, minHeight: 340)
+        .onAppear { if model.dirField.isEmpty { model.dirField = poller.modelsDir ?? "" } }
     }
 }
 
@@ -285,6 +475,11 @@ final class HealthPoller: ObservableObject {
     @Published var isUp: Bool = false
     @Published var agentState: LaunchAgentControl.AgentState = .notInstalled
     @Published var lastError: String?
+    // Effective models directory (from GET /admin/models-dir). `managed` ⇒
+    // OdyssAI-X owns it (read-only in the UI); else standalone (editable).
+    @Published var modelsDir: String?
+    @Published var modelsDirSource: String = "unset"
+    @Published var modelsDirManaged: Bool = false
 
     let settings: Settings
     private var timer: Timer?
@@ -338,6 +533,7 @@ final class HealthPoller: ObservableObject {
             memoryFreeGB = json["wired_memory_free_gb"] as? Double ?? 0
             uptimeSeconds = json["uptime_s"] as? Double ?? 0
             await refreshActivity()
+            await refreshModelsDir()
             lastError = nil
         } catch {
             isUp = false
@@ -376,6 +572,27 @@ final class HealthPoller: ObservableObject {
             runtimeLastError = json["last_error"] as? String
         } catch {
             clearActivity()
+        }
+    }
+
+    /// Poll the effective models directory (bearer-protected admin route).
+    private func refreshModelsDir() async {
+        guard let url = settings.endpointURL?.appendingPathComponent("/admin/models-dir") else { return }
+        do {
+            var req = URLRequest(url: url)
+            req.timeoutInterval = 3.0
+            let key = settings.apiKey
+            if !key.isEmpty {
+                req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            }
+            let (data, response) = try await URLSession.shared.data(for: req)
+            guard let code = (response as? HTTPURLResponse)?.statusCode, code == 200 else { return }
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+            modelsDir = json["dir"] as? String
+            modelsDirSource = json["source"] as? String ?? "unset"
+            modelsDirManaged = json["managed"] as? Bool ?? false
+        } catch {
+            // Keep last-known values on a transient failure.
         }
     }
 
@@ -499,7 +716,20 @@ struct MenuBarPopover: View {
     }
 
     private var modelsSection: some View {
-        Group {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "folder").frame(width: 16)
+                Text(poller.modelsDir ?? "no models directory set")
+                    .font(.caption.monospaced())
+                    .foregroundColor(poller.modelsDir == nil ? .orange : .secondary)
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer()
+                Text(poller.modelsDirManaged ? "OdyssAI-X" : (poller.modelsDir == nil ? "unset" : "local"))
+                    .font(.caption2.weight(.semibold))
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(Capsule().fill(.quaternary))
+            }
             if poller.modelsLoaded.isEmpty {
                 Text("No models loaded")
                     .foregroundColor(.secondary)
@@ -645,8 +875,10 @@ struct MenuBarPopover: View {
                 .help("Refresh now")
             }
             HStack(spacing: 8) {
-                Button(action: openDashboard) {
-                    Label("Dashboard", systemImage: "rectangle.on.rectangle")
+                Button {
+                    ModelsWindowController.shared.show(poller: poller, settings: settings)
+                } label: {
+                    Label("Models", systemImage: "shippingbox")
                 }
                 Button {
                     MonitorWindowController.shared.show(poller: poller, settings: settings)

@@ -1,4 +1,5 @@
 import Foundation
+import TelemakVersion
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -26,7 +27,7 @@ public enum RamBudget {
 
         // TELEMAK_MODELS_DIR — Odysseus layout `<root>/<id>` or
         // `<root>/<id>/snapshots/<hash>/`.
-        if let root = ProcessInfo.processInfo.environment["TELEMAK_MODELS_DIR"], !root.isEmpty {
+        if let root = ModelsConfig.shared.effectiveDir(), !root.isEmpty {
             let base = (root as NSString).appendingPathComponent(id)
             let snapshotsBase = (base as NSString).appendingPathComponent("snapshots")
             if let snaps = try? fm.contentsOfDirectory(atPath: snapshotsBase) {

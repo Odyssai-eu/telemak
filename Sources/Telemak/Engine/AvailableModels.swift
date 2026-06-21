@@ -1,4 +1,5 @@
 import Foundation
+import TelemakVersion
 
 /// Filesystem scan for models locally available to Telemak — `TELEMAK_MODELS_DIR`
 /// (Odysseus layout) and the HF cache (`~/.cache/huggingface/hub/`).
@@ -28,7 +29,7 @@ public enum AvailableModels {
     }
 
     public static func scan(
-        telemakModelsDir: String? = ProcessInfo.processInfo.environment["TELEMAK_MODELS_DIR"],
+        telemakModelsDir: String? = ModelsConfig.shared.effectiveDir(),
         hfCacheDir: String? = AvailableModels.defaultHFCache()
     ) -> [Entry] {
         var byId: [String: Entry] = [:]

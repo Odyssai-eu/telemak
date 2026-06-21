@@ -1,4 +1,5 @@
 import Foundation
+import TelemakVersion
 import MLXLMCommon
 import MLXLLM
 import MLXVLM
@@ -47,10 +48,14 @@ public enum ModelLoader {
     /// directory, session cache and wired-memory reservations are keyed by
     /// model id; accepting both `/Volumes/.../org/name` and `org/name` for
     /// the same files creates duplicate identities for one model.
+    ///
+    /// Resolves against the CURRENT effective models dir. Bounded edge: unloading
+    /// a model by ABSOLUTE PATH after the dir was changed under it won't strip the
+    /// stale prefix — unload by the `org/name` id instead (the common path).
     public static func canonicalIdentifier(_ identifier: String) -> String {
         let trimmed = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("/"),
-              let modelsDir = ProcessInfo.processInfo.environment["TELEMAK_MODELS_DIR"]
+              let modelsDir = ModelsConfig.shared.effectiveDir()
         else {
             return trimmed
         }
@@ -89,7 +94,7 @@ public enum ModelLoader {
             // Defense-in-depth: when TELEMAK_MODELS_DIR is set, reject absolute
             // paths outside it. Returns the same error as a failed load so the
             // caller can't distinguish "denied" from "missing config.json".
-            if let modelsDir = ProcessInfo.processInfo.environment["TELEMAK_MODELS_DIR"] {
+            if let modelsDir = ModelsConfig.shared.effectiveDir() {
                 let rootPath = URL(fileURLWithPath: modelsDir).standardized.path
                 let modelPath = URL(fileURLWithPath: identifier).standardized.path
                 guard isPath(modelPath, sameOrDescendantOf: rootPath) else {
@@ -102,7 +107,7 @@ public enum ModelLoader {
             }
         }
 
-        if let modelsDir = ProcessInfo.processInfo.environment["TELEMAK_MODELS_DIR"],
+        if let modelsDir = ModelsConfig.shared.effectiveDir(),
            let url = resolveModelsDir(modelsDir, id: identifier) {
             let prepared = (try? prepareConfigForMLX(originalDir: url, id: identifier)) ?? url
             return try await dispatchedLoad(prepared: prepared, forceLLM: forceLLM)
@@ -463,7 +468,7 @@ public enum ModelLoader {
         if identifier.hasPrefix("/") {
             return resolveDirectory(at: identifier)
         }
-        if let modelsDir = ProcessInfo.processInfo.environment["TELEMAK_MODELS_DIR"],
+        if let modelsDir = ModelsConfig.shared.effectiveDir(),
            let url = resolveModelsDir(modelsDir, id: identifier) {
             return url
         }
