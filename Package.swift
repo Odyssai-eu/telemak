@@ -16,8 +16,9 @@ let package = Package(
     dependencies: [
         // Odyssai-eu fork — adds Qwen35 hidden-state access plus
         // targetVerify / rollbackSpeculativeCache for V2 MTP speculative
-        // decoding. Tracks upstream main otherwise.
-        .package(url: "https://github.com/Odyssai-eu/mlx-swift-lm", branch: "feat/v2-mtp-ssm-rollback-pre-moe"),
+        // decoding, and the hy_v3 (HunYuan-3) base model. Tracks upstream
+        // main otherwise. feat/hy_v3 = pre-moe superset + hy_v3 base, no MoE-MTP.
+        .package(url: "https://github.com/Odyssai-eu/mlx-swift-lm", branch: "feat/hy_v3"),
         .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.31.3")),
         .package(url: "https://github.com/hummingbird-project/hummingbird", from: "2.24.0"),
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.5.0"),
