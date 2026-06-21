@@ -1,4 +1,5 @@
 import Foundation
+import TelemakVersion
 import MLX
 import MLXLLM
 import MLXLMCommon
@@ -43,7 +44,7 @@ public enum MTPModelLoader {
             switch self {
             case .directoryNotFound(let id):
                 return
-                    "MTP draft '\(id)' not found locally. Set TELEMAK_MODELS_DIR or pass an absolute path."
+                    "MTP draft '\(id)' not found locally. Set your models directory (OdyssAI-X or the menubar) or pass an absolute path."
             case .configMissing(let dir):
                 return "config.json missing in \(dir)"
             case .configDecodeFailed(let dir, let why):
@@ -262,7 +263,7 @@ public enum MTPModelLoader {
             }
             throw LoadError.directoryNotFound(id: identifier)
         }
-        if let modelsDir = ProcessInfo.processInfo.environment["TELEMAK_MODELS_DIR"],
+        if let modelsDir = ModelsConfig.shared.effectiveDir(),
            let url = ModelLoader.resolveModelsDir(modelsDir, id: identifier)
         {
             return url

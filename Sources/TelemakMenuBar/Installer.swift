@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import SwiftUI
+import TelemakVersion
 
 @MainActor
 final class InstallerWindowController {
@@ -39,7 +40,7 @@ final class InstallerModel: ObservableObject {
     @Published var smokeOK = false
 
     init() {
-        self.modelsDir = TelemakInstaller.defaultModelsDir().path
+        self.modelsDir = TelemakInstaller.defaultModelsDir()?.path ?? ""
         let alreadyInstalled = TelemakInstaller.isInstalled
         self.installed = alreadyInstalled
         self.status = alreadyInstalled ? "Installed" : "Ready to install"
@@ -52,13 +53,20 @@ final class InstallerModel: ObservableObject {
         panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
         panel.prompt = "Use this folder"
-        panel.directoryURL = URL(fileURLWithPath: modelsDir, isDirectory: true)
+        panel.directoryURL = modelsDir.isEmpty
+            ? FileManager.default.homeDirectoryForCurrentUser
+            : URL(fileURLWithPath: modelsDir, isDirectory: true)
         if panel.runModal() == .OK, let url = panel.url {
             modelsDir = url.path
         }
     }
 
     func install() {
+        let chosen = modelsDir.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !chosen.isEmpty else {
+            status = "Choose a models directory first"
+            return
+        }
         isInstalling = true
         smokeOK = false
         status = "Installing..."
@@ -124,7 +132,7 @@ struct InstallerView: View {
                     .textFieldStyle(.roundedBorder)
                 Button("Choose...", action: model.chooseModelsDir)
             }
-            Text("Default is /Volumes/models/odysseus when present, otherwise ~/Telemak-Models.")
+            Text("Where models are stored on this Mac. When paired, OdyssAI-X manages this for you.")
                 .font(.caption)
                 .foregroundColor(.secondary)
         }
@@ -194,17 +202,20 @@ enum TelemakInstaller {
             && FileManager.default.fileExists(atPath: serverPlist.path)
     }
 
-    static func defaultModelsDir() -> URL {
-        let odysseus = URL(fileURLWithPath: "/Volumes/models/odysseus", isDirectory: true)
-        if FileManager.default.fileExists(atPath: odysseus.path) {
-            return odysseus
-        }
-        return home.appendingPathComponent("Telemak-Models", isDirectory: true)
+    /// The current effective models directory (from config.json, or the legacy
+    /// env), or nil when nothing is configured yet — there is NO hardcoded
+    /// default. The installer pre-fills the picker with this; an empty picker
+    /// forces an explicit choice.
+    static func defaultModelsDir() -> URL? {
+        ModelsConfig.shared.effectiveDir().map { URL(fileURLWithPath: $0, isDirectory: true) }
     }
 
     static func install(modelsDir: URL) throws -> [String] {
         let fm = FileManager.default
         var log: [String] = []
+        guard !modelsDir.path.isEmpty, modelsDir.path != "/" else {
+            throw InstallerError.modelsDirRequired
+        }
         guard Bundle.main.bundleURL.path.hasPrefix("/Applications/") else {
             throw InstallerError.appMustLiveInApplications
         }
@@ -258,9 +269,14 @@ enum TelemakInstaller {
             log.append("No admin API key configured; /admin/* remains open on the LAN")
         }
 
+        // The models dir is no longer baked into the LaunchAgent env. The server
+        // reads it from ~/.telemak/config.json (so OdyssAI-X, the master, can
+        // override it live). Write the installer's choice there as the standalone
+        // default (managed:false → editable in the menubar until a master pushes).
+        try ModelsConfig.shared.set(dir: modelsDir.path, managed: false)
+        log.append("Wrote models directory to ~/.telemak/config.json: \(modelsDir.path)")
         var serverEnvironment = [
             "PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-            "TELEMAK_MODELS_DIR": modelsDir.path,
             "TELEMAK_LOG_LEVEL": "info",
         ]
         if let apiKey, !apiKey.isEmpty {
@@ -414,6 +430,7 @@ enum TelemakInstaller {
         case appMustLiveInApplications
         case missingResource(String)
         case commandFailed(String, String)
+        case modelsDirRequired
 
         var errorDescription: String? {
             switch self {
@@ -423,6 +440,8 @@ enum TelemakInstaller {
                 return "Missing bundled resource: \(name)"
             case .commandFailed(let command, let stderr):
                 return "\(command) failed: \(stderr)"
+            case .modelsDirRequired:
+                return "Choose a models directory before installing — it is required (there is no default)."
             }
         }
     }
