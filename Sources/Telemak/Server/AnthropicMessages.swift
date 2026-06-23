@@ -98,7 +98,6 @@ struct AnthropicMessagesHandler: Sendable {
         } else {
             session = ChatSession(container, instructions: system, generateParameters: params)
         }
-        _ = cachedTokens // future: surface via usage extension
 
         let activityId = await activity.begin(model: modelId, phase: .prefill)
         let genStart = Date()
@@ -147,7 +146,11 @@ struct AnthropicMessagesHandler: Sendable {
             content: [AnthropicContentBlock(type: "text", text: completion)],
             stopReason: "end_turn",
             stopSequence: nil,
-            usage: .init(inputTokens: promptTokens, outputTokens: completionTokens)
+            usage: .init(
+                inputTokens: promptTokens,
+                outputTokens: completionTokens,
+                cacheReadInputTokens: cachedTokens > 0 ? cachedTokens : nil
+            )
         )
 
         let data = try JSONEncoder().encode(response)
@@ -176,9 +179,11 @@ struct AnthropicMessagesHandler: Sendable {
 
         let body = ResponseBody(contentLength: nil) { writer in
             let session: ChatSession
+            var cachedTokens = 0
             if let cacheHit {
                 do {
                     let (loaded, _) = try loadPromptCache(url: cacheHit)
+                    cachedTokens = loaded.first?.offset ?? 0
                     session = ChatSession(container, instructions: nil, cache: loaded, generateParameters: params)
                 } catch {
                     session = ChatSession(container, instructions: effectiveSystem, generateParameters: params)
@@ -260,17 +265,23 @@ struct AnthropicMessagesHandler: Sendable {
                 // but we don't know the prompt token count until
                 // `GenerateCompletionInfo` arrives — populate at delta
                 // time so clients reading either event see the right
-                // total).
+                // total). `cache_read_input_tokens` reports session-cache
+                // reuse for Odysseus/Companion metrics — only present when
+                // > 0 so the shape stays minimal for cache-miss streams.
+                var usageBlock: [String: Any] = [
+                    "input_tokens": info?.promptTokenCount ?? 0,
+                    "output_tokens": info?.generationTokenCount ?? 0,
+                ]
+                if cachedTokens > 0 {
+                    usageBlock["cache_read_input_tokens"] = cachedTokens
+                }
                 try await send(event: "message_delta", payload: [
                     "type": "message_delta",
                     "delta": [
                         "stop_reason": "end_turn",
                         "stop_sequence": NSNull(),
                     ],
-                    "usage": [
-                        "input_tokens": info?.promptTokenCount ?? 0,
-                        "output_tokens": info?.generationTokenCount ?? 0,
-                    ],
+                    "usage": usageBlock,
                 ])
 
                 try await send(event: "message_stop", payload: [

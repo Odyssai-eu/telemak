@@ -144,10 +144,16 @@ struct AnthropicMessageResponse: Codable, Sendable {
     struct Usage: Codable, Sendable {
         var inputTokens: Int
         var outputTokens: Int
+        /// Tokens served from the session-cache (KV prefix reuse). Matches
+        /// Anthropic's `usage.cache_read_input_tokens` spec. Nil when no
+        /// cache hit happened — encoded as JSON `null` so clients that
+        /// know the field can use it, clients that don't ignore it.
+        var cacheReadInputTokens: Int?
 
         enum CodingKeys: String, CodingKey {
             case inputTokens = "input_tokens"
             case outputTokens = "output_tokens"
+            case cacheReadInputTokens = "cache_read_input_tokens"
         }
     }
 
