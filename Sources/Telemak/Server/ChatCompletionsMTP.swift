@@ -193,14 +193,9 @@ extension ChatCompletionsHandler {
         let created = Int(Date().timeIntervalSince1970)
 
         let body = ResponseBody(contentLength: nil) { writer in
-            let encoder = JSONEncoder()
+            let sse = SSEWriter(writer: writer)
             func send(_ chunk: ChatCompletionChunk) async throws {
-                let data = try encoder.encode(chunk)
-                var buffer = ByteBuffer()
-                buffer.writeString("data: ")
-                buffer.writeBytes(data)
-                buffer.writeString("\n\n")
-                try await writer.write(buffer)
+                try await sse.write(data: chunk)
             }
 
             // Role chunk — same shape as the regular streaming path so
@@ -281,19 +276,12 @@ extension ChatCompletionsHandler {
                     "choices": [],
                     "usage": usageBlock,
                 ]
-                if let payload = try? JSONSerialization.data(withJSONObject: usageChunk) {
-                    var buf = ByteBuffer()
-                    buf.writeString("data: ")
-                    buf.writeBytes(payload)
-                    buf.writeString("\n\n")
-                    try await writer.write(buf)
-                }
+                try await sse.write(data: usageChunk)
 
-                try await writer.write(ByteBuffer(string: "data: [DONE]\n\n"))
+                try await sse.writeDone()
             } catch {
                 await activity.fail(activityId, error: "\(error)")
-                let payload = #"{"error":{"message":"mtp generation failed: \#(error)","type":"generation_failed"}}"#
-                try? await writer.write(ByteBuffer(string: "data: \(payload)\n\n"))
+                try await sse.writeError(message: "mtp generation failed: \(error)")
             }
 
             let elapsed = Date().timeIntervalSince(genStart)

@@ -265,7 +265,7 @@ struct ChatCompletionsHandler: Sendable {
         }
 
         if let sessionId, let sessionStore {
-            await saveSessionCache(
+            await SessionCachePersistence.save(
                 session: session,
                 sessionId: sessionId,
                 modelId: modelId,
@@ -317,7 +317,7 @@ struct ChatCompletionsHandler: Sendable {
         )
     }
 
-    // MARK: - Streaming
+    // MARK: - Tool-history response (non-stream + dispatch to streaming)
 
     private func structuredMessagesResponse(
         payload: ChatCompletionRequest,
@@ -450,435 +450,7 @@ struct ChatCompletionsHandler: Sendable {
         )
     }
 
-    private func streamingResponse(
-        container: ModelContainer,
-        instructions: String?,
-        params: GenerateParameters,
-        userPrompt: String,
-        modelId: String,
-        sessionId: String?,
-        cacheHit: URL?,
-        sessionCacheScope: String,
-        stopSequences: [String],
-        images: VisionImageBatch,
-        toolSpecs: [[String: any Sendable]]?,
-        additionalContext: [String: any Sendable]?,
-        stats: StatsTracker,
-        activity: ActivityTracker,
-        sessionStore: SessionStore?
-    ) -> Response {
-        let id = "chatcmpl-\(UUID().uuidString.lowercased())"
-        let created = Int(Date().timeIntervalSince1970)
-
-        let body = ResponseBody(contentLength: nil) { writer in
-            let encoder = JSONEncoder()
-            let session: ChatSession
-            var cachedTokens = 0
-            if let cacheHit {
-                do {
-                    let (loaded, _) = try loadPromptCache(url: cacheHit)
-                    cachedTokens = loaded.first?.offset ?? 0
-                    session = ChatSession(
-                        container, instructions: nil, cache: loaded,
-                        generateParameters: params,
-                        additionalContext: additionalContext, tools: toolSpecs
-                    )
-                } catch {
-                    session = ChatSession(
-                        container, instructions: instructions,
-                        generateParameters: params,
-                        additionalContext: additionalContext, tools: toolSpecs
-                    )
-                }
-            } else {
-                session = ChatSession(
-                    container, instructions: instructions,
-                    generateParameters: params,
-                    additionalContext: additionalContext, tools: toolSpecs
-                )
-            }
-
-            let activityId = await activity.begin(model: modelId, phase: .prefill)
-            func send(_ chunk: ChatCompletionChunk) async throws {
-                await activity.setPhase(activityId, .streaming)
-                let data = try encoder.encode(chunk)
-                var buffer = ByteBuffer()
-                buffer.writeString("data: ")
-                buffer.writeBytes(data)
-                buffer.writeString("\n\n")
-                try await writer.write(buffer)
-            }
-
-            let genStart = Date()
-            var stopChecker = StopChecker(stops: stopSequences)
-            var info: GenerateCompletionInfo?
-            var anyToolCalls = false
-            var pendingContent = ""
-            var pendingPieces = 0
-            let maxPiecesPerChunk = 10
-            let maxCharactersPerChunk = 512
-
-            func flushPendingContent(force: Bool = false) async throws {
-                guard !pendingContent.isEmpty else { return }
-                if !force,
-                   pendingPieces < maxPiecesPerChunk,
-                   pendingContent.count < maxCharactersPerChunk
-                {
-                    return
-                }
-
-                let content = pendingContent
-                pendingContent.removeAll(keepingCapacity: true)
-                pendingPieces = 0
-
-                let chunk = ChatCompletionChunk(
-                    id: id, object: "chat.completion.chunk",
-                    created: created, model: modelId,
-                    choices: [.init(index: 0, delta: .init(role: nil, content: content), finishReason: nil)]
-                )
-                try await send(chunk)
-            }
-
-            do {
-                let role = ChatCompletionChunk(
-                    id: id, object: "chat.completion.chunk",
-                    created: created, model: modelId,
-                    choices: [.init(index: 0, delta: .init(role: "assistant", content: nil), finishReason: nil)]
-                )
-                try await send(role)
-
-                await activity.setPhase(activityId, .decode)
-                try await runWithOptionalWiredLimit {
-                    for try await gen in session.streamDetails(to: userPrompt, images: images.images, videos: []) {
-                        await activity.setPhase(activityId, .decode)
-                        switch gen {
-                        case .chunk(let piece):
-                            await activity.incrementGeneratedTokens(activityId)
-                            let emit = stopChecker.feed(piece)
-                            if !emit.isEmpty {
-                                pendingContent += emit
-                                pendingPieces += 1
-                                try await flushPendingContent()
-                            }
-                        case .info(let i):
-                            info = i
-                            await activity.setGeneratedTokens(activityId, i.generationTokenCount)
-                        case .toolCall(let call):
-                            try await flushPendingContent(force: true)
-                            anyToolCalls = true
-                            let chatCall = self.toolCallToChat(call)
-                            let chunk = ChatCompletionChunk(
-                                id: id, object: "chat.completion.chunk",
-                                created: created, model: modelId,
-                                choices: [.init(
-                                    index: 0,
-                                    delta: .init(role: nil, content: nil, toolCalls: [chatCall]),
-                                    finishReason: nil
-                                )]
-                            )
-                            try await send(chunk)
-                        }
-                        if stopChecker.hit { break }
-                    }
-                }
-                if !stopChecker.hit {
-                    let tail = stopChecker.flushRemaining()
-                    if !tail.isEmpty {
-                        pendingContent += tail
-                        pendingPieces += 1
-                    }
-                }
-                try await flushPendingContent(force: true)
-
-                let finishReason = anyToolCalls ? "tool_calls" : "stop"
-                let stop = ChatCompletionChunk(
-                    id: id, object: "chat.completion.chunk",
-                    created: created, model: modelId,
-                    choices: [.init(index: 0, delta: .init(role: nil, content: nil), finishReason: finishReason)]
-                )
-                try await send(stop)
-
-                // Standard OpenAI streaming `usage` chunk — emitted between
-                // finish_reason and [DONE] so clients can render tok/s,
-                // prompt/completion tokens, total. We always emit (spec gates
-                // it on `stream_options.include_usage: true`, but clients
-                // that don't read it discard silently — and Companion's
-                // chat-meta row depends on this signal).
-                //
-                // Counts come from `GenerateCompletionInfo` when the model
-                // emitted one before the iterator finished; otherwise we
-                // fall back to a coarse character-based estimate matching
-                // the non-stream path.
-                let promptTokens = info?.promptTokenCount ?? max(1, userPrompt.count / 4)
-                let completionTokens = info?.generationTokenCount ?? 1
-                var usageBlock: [String: Any] = [
-                    "prompt_tokens": promptTokens,
-                    "completion_tokens": completionTokens,
-                    "total_tokens": promptTokens + completionTokens,
-                ]
-                if cachedTokens > 0 {
-                    usageBlock["prompt_tokens_details"] = ["cached_tokens": cachedTokens]
-                }
-                let usageChunk: [String: Any] = [
-                    "id": id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": modelId,
-                    "choices": [],
-                    "usage": usageBlock,
-                ]
-                if let payload = try? JSONSerialization.data(withJSONObject: usageChunk) {
-                    var buf = ByteBuffer()
-                    buf.writeString("data: ")
-                    buf.writeBytes(payload)
-                    buf.writeString("\n\n")
-                    try await writer.write(buf)
-                }
-
-                try await writer.write(ByteBuffer(string: "data: [DONE]\n\n"))
-            } catch {
-                await activity.fail(activityId, error: "\(error)")
-                let payload = #"{"error":{"message":"streaming aborted: \#(error)","type":"generation_failed"}}"#
-                try? await writer.write(ByteBuffer(string: "data: \(payload)\n\n"))
-            }
-            let elapsed = Date().timeIntervalSince(genStart)
-            let observedTokens = info?.generationTokenCount ?? 1
-            await activity.setGeneratedTokens(activityId, observedTokens)
-            await activity.finish(activityId)
-            await stats.recordRequest(tokens: observedTokens, elapsedSeconds: elapsed)
-
-            if let sessionId, let sessionStore {
-                await saveSessionCache(
-                        session: session,
-                        sessionId: sessionId,
-                        modelId: modelId,
-                        cacheScope: sessionCacheScope,
-                        sessionStore: sessionStore
-                    )
-            }
-
-            try await writer.finish(nil)
-        }
-
-        return Response(
-            status: .ok,
-            headers: [
-                .contentType: "text/event-stream",
-                .cacheControl: "no-cache",
-                .connection: "keep-alive",
-            ],
-            body: body
-        )
-    }
-
-    private func streamingStructuredMessagesResponse(
-        container: ModelContainer,
-        rawMessages: [[String: any Sendable]],
-        params: GenerateParameters,
-        modelId: String,
-        stopSequences: [String],
-        toolSpecs: [[String: any Sendable]]?,
-        additionalContext: [String: any Sendable]?
-    ) -> Response {
-        let id = "chatcmpl-\(UUID().uuidString.lowercased())"
-        let created = Int(Date().timeIntervalSince1970)
-
-        let body = ResponseBody(contentLength: nil) { writer in
-            let encoder = JSONEncoder()
-            func send(_ chunk: ChatCompletionChunk) async throws {
-                let data = try encoder.encode(chunk)
-                var buffer = ByteBuffer()
-                buffer.writeString("data: ")
-                buffer.writeBytes(data)
-                buffer.writeString("\n\n")
-                try await writer.write(buffer)
-            }
-
-            let activityId = await activity.begin(model: modelId, phase: .prefill)
-            let genStart = Date()
-            var stopChecker = StopChecker(stops: stopSequences)
-            var info: GenerateCompletionInfo?
-            var anyToolCalls = false
-            var pendingContent = ""
-            var pendingPieces = 0
-            let maxPiecesPerChunk = 10
-            let maxCharactersPerChunk = 512
-
-            func flushPendingContent(force: Bool = false) async throws {
-                guard !pendingContent.isEmpty else { return }
-                if !force,
-                   pendingPieces < maxPiecesPerChunk,
-                   pendingContent.count < maxCharactersPerChunk
-                {
-                    return
-                }
-
-                let content = pendingContent
-                pendingContent.removeAll(keepingCapacity: true)
-                pendingPieces = 0
-                try await send(.init(
-                    id: id,
-                    object: "chat.completion.chunk",
-                    created: created,
-                    model: modelId,
-                    choices: [.init(index: 0, delta: .init(role: nil, content: content), finishReason: nil)]
-                ))
-            }
-
-            do {
-                try await send(.init(
-                    id: id,
-                    object: "chat.completion.chunk",
-                    created: created,
-                    model: modelId,
-                    choices: [.init(index: 0, delta: .init(role: "assistant", content: nil), finishReason: nil)]
-                ))
-
-                let input = UserInput(
-                    messages: rawMessages,
-                    tools: toolSpecs,
-                    additionalContext: additionalContext
-                )
-                let stream = try await makeRawGenerationStream(
-                    container: container,
-                    input: input,
-                    params: params,
-                    toolSpecs: toolSpecs
-                )
-
-                await activity.setPhase(activityId, .decode)
-                try await runWithOptionalWiredLimit {
-                    for await gen in stream {
-                        switch gen {
-                        case .chunk(let piece):
-                            await activity.incrementGeneratedTokens(activityId)
-                            let emit = stopChecker.feed(piece)
-                            if !emit.isEmpty {
-                                pendingContent += emit
-                                pendingPieces += 1
-                                try await flushPendingContent()
-                            }
-                            if stopChecker.hit { break }
-                        case .info(let i):
-                            info = i
-                            await activity.setGeneratedTokens(activityId, i.generationTokenCount)
-                        case .toolCall(let call):
-                            try await flushPendingContent(force: true)
-                            anyToolCalls = true
-                            try await send(.init(
-                                id: id,
-                                object: "chat.completion.chunk",
-                                created: created,
-                                model: modelId,
-                                choices: [.init(
-                                    index: 0,
-                                    delta: .init(role: nil, content: nil, toolCalls: [toolCallToChat(call)]),
-                                    finishReason: nil
-                                )]
-                            ))
-                        }
-                    }
-                    if !stopChecker.hit {
-                        let tail = stopChecker.flushRemaining()
-                        if !tail.isEmpty {
-                            pendingContent += tail
-                            pendingPieces += 1
-                        }
-                    }
-                }
-                try await flushPendingContent(force: true)
-
-                let finishReason = anyToolCalls ? "tool_calls" : "stop"
-                try await send(.init(
-                    id: id,
-                    object: "chat.completion.chunk",
-                    created: created,
-                    model: modelId,
-                    choices: [.init(index: 0, delta: .init(role: nil, content: nil), finishReason: finishReason)]
-                ))
-
-                let promptTokens = info?.promptTokenCount ?? max(1, rawMessages.description.count / 4)
-                let completionTokens = info?.generationTokenCount ?? 1
-                let usageChunk: [String: Any] = [
-                    "id": id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": modelId,
-                    "choices": [],
-                    "usage": [
-                        "prompt_tokens": promptTokens,
-                        "completion_tokens": completionTokens,
-                        "total_tokens": promptTokens + completionTokens,
-                    ],
-                ]
-                if let payload = try? JSONSerialization.data(withJSONObject: usageChunk) {
-                    var buf = ByteBuffer()
-                    buf.writeString("data: ")
-                    buf.writeBytes(payload)
-                    buf.writeString("\n\n")
-                    try await writer.write(buf)
-                }
-                try await writer.write(ByteBuffer(string: "data: [DONE]\n\n"))
-            } catch {
-                await activity.fail(activityId, error: "\(error)")
-                let payload = #"{"error":{"message":"streaming aborted: \#(error)","type":"generation_failed"}}"#
-                try? await writer.write(ByteBuffer(string: "data: \(payload)\n\n"))
-            }
-
-            let elapsed = Date().timeIntervalSince(genStart)
-            let observedTokens = info?.generationTokenCount ?? 1
-            await activity.setGeneratedTokens(activityId, observedTokens)
-            await activity.finish(activityId)
-            await stats.recordRequest(tokens: observedTokens, elapsedSeconds: elapsed)
-            try await writer.finish(nil)
-        }
-
-        return Response(
-            status: .ok,
-            headers: [
-                .contentType: "text/event-stream",
-                .cacheControl: "no-cache",
-                .connection: "keep-alive",
-            ],
-            body: body
-        )
-    }
-
     // MARK: - Helpers
-
-    /// Save the live cache from `session` to a fresh URL and register it in
-    /// `sessionStore`. Best-effort: failures (e.g. session.saveCache throws
-    /// ChatSessionError.noCacheAvailable on empty sessions) are swallowed
-    /// so a save miss never breaks the response.
-    private func saveSessionCache(
-        session: ChatSession,
-        sessionId: String,
-        modelId: String,
-        cacheScope: String,
-        sessionStore: SessionStore
-    ) async {
-        let url = await sessionStore.nextCacheURL(for: sessionId)
-        do {
-            try await session.saveCache(to: url)
-            let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
-            await sessionStore.update(
-                sessionId: sessionId,
-                modelId: modelId,
-                cacheScope: cacheScope,
-                cacheURL: url,
-                byteSize: size
-            )
-        } catch ChatSessionError.noCacheAvailable {
-            // No cache to save (empty generation, tool-only response, etc.).
-            // Not an error — just skip persistence.
-            try? FileManager.default.removeItem(at: url)
-        } catch {
-            // Genuinely unexpected: log so operators can see if disk is full,
-            // permissions broke, etc. Don't fail the response.
-            FileHandle.standardError.write(Data("[telemak.kv] saveCache failed for session \(sessionId): \(error)\n".utf8))
-            try? FileManager.default.removeItem(at: url)
-        }
-    }
 
     private static func sessionCacheScope(_ context: [String: any Sendable]?) -> String {
         guard let context, !context.isEmpty else { return "" }
@@ -893,7 +465,10 @@ struct ChatCompletionsHandler: Sendable {
     /// paths uncluttered. Body is NOT @Sendable so it can capture
     /// non-Sendable state (ChatSession, mutable locals from the request
     /// handler).
-    private func runWithOptionalWiredLimit<R>(_ body: () async throws -> R) async throws -> R {
+    ///
+    /// `internal` (not `private`) because `ChatCompletionsStreaming.swift`
+    /// (extension on this handler) calls it from the streaming path.
+    func runWithOptionalWiredLimit<R>(_ body: () async throws -> R) async throws -> R {
         guard let wiredMemory else { return try await body() }
         let ticket = await wiredMemory.makeInferenceTicket(
             workspaceBytes: WiredMemoryCoordinator.defaultWorkspaceBytes
@@ -901,7 +476,10 @@ struct ChatCompletionsHandler: Sendable {
         return try await WiredMemoryTicket.withWiredLimit(ticket, body)
     }
 
-    private func makeRawGenerationStream(
+    /// `internal` (not `private`) because `ChatCompletionsStreaming.swift`
+    /// (extension on this handler) calls it from the streaming-with-tool-
+    /// history path.
+    func makeRawGenerationStream(
         container: ModelContainer,
         input: UserInput,
         params: GenerateParameters,
@@ -998,7 +576,11 @@ struct ChatCompletionsHandler: Sendable {
     /// Convert mlx-swift-lm's `ToolCall` (`{function: {name, arguments:
     /// [String: JSONValue]}}`) to the OpenAI wire shape
     /// (`{id, type:"function", function:{name, arguments:"<json-string>"}}`).
-    private func toolCallToChat(_ call: ToolCall) -> ChatToolCall {
+    ///
+    /// `internal` (not `private`) because `ChatCompletionsStreaming.swift`
+    /// (extension on this handler) calls it from the streaming tool-call
+    /// delta path.
+    func toolCallToChat(_ call: ToolCall) -> ChatToolCall {
         // `function.arguments` is `[String: MLXLMCommon.JSONValue]`, which is
         // mlx-swift-lm's local JSONValue (not ours). Serialize via its
         // `anyValue` representation.

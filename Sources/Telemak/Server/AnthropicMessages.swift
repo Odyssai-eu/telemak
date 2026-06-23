@@ -124,10 +124,11 @@ struct AnthropicMessagesHandler: Sendable {
         let elapsed = Date().timeIntervalSince(genStart)
 
         if let sessionId, let sessionStore {
-            await saveSessionCache(
+            await SessionCachePersistence.save(
                 session: session,
                 sessionId: sessionId,
                 modelId: modelId,
+                cacheScope: "",
                 sessionStore: sessionStore
             )
         }
@@ -178,6 +179,7 @@ struct AnthropicMessagesHandler: Sendable {
         let messageId = "msg_\(UUID().uuidString.lowercased().prefix(24))"
 
         let body = ResponseBody(contentLength: nil) { writer in
+            let sse = SSEWriter(writer: writer)
             let session: ChatSession
             var cachedTokens = 0
             if let cacheHit {
@@ -194,15 +196,7 @@ struct AnthropicMessagesHandler: Sendable {
 
             // Event encoding: `event: <name>\ndata: {<json>}\n\n`.
             func send(event: String, payload: [String: Any]) async throws {
-                let data = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data("{}".utf8)
-                var buf = ByteBuffer()
-                buf.writeString("event: ")
-                buf.writeString(event)
-                buf.writeString("\n")
-                buf.writeString("data: ")
-                buf.writeBytes(data)
-                buf.writeString("\n\n")
-                try await writer.write(buf)
+                try await sse.write(event: event, data: payload)
             }
 
             let genStart = Date()
@@ -302,8 +296,11 @@ struct AnthropicMessagesHandler: Sendable {
             await stats.recordRequest(tokens: observed, elapsedSeconds: elapsed)
 
             if let sessionId, let sessionStore {
-                await saveSessionCache(
-                    session: session, sessionId: sessionId, modelId: modelId,
+                await SessionCachePersistence.save(
+                    session: session,
+                    sessionId: sessionId,
+                    modelId: modelId,
+                    cacheScope: "",
                     sessionStore: sessionStore
                 )
             }
@@ -339,25 +336,6 @@ struct AnthropicMessagesHandler: Sendable {
             return last.content.asPlainText
         }
         return ""
-    }
-
-    private func saveSessionCache(
-        session: ChatSession,
-        sessionId: String,
-        modelId: String,
-        sessionStore: SessionStore
-    ) async {
-        let url = await sessionStore.nextCacheURL(for: sessionId)
-        do {
-            try await session.saveCache(to: url)
-            let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
-            await sessionStore.update(
-                sessionId: sessionId, modelId: modelId,
-                cacheURL: url, byteSize: size
-            )
-        } catch {
-            try? FileManager.default.removeItem(at: url)
-        }
     }
 
     private func jsonError(_ status: HTTPResponse.Status, type: String, message: String) -> Response {
