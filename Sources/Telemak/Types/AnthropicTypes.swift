@@ -146,8 +146,10 @@ struct AnthropicMessageResponse: Codable, Sendable {
         var outputTokens: Int
         /// Tokens served from the session-cache (KV prefix reuse). Matches
         /// Anthropic's `usage.cache_read_input_tokens` spec. Nil when no
-        /// cache hit happened — encoded as JSON `null` so clients that
-        /// know the field can use it, clients that don't ignore it.
+        /// cache hit happened — Swift's default JSONEncoder omits nil
+        /// fields, so the key is absent from the wire payload (matches
+        /// the streaming path's `if cachedTokens > 0` guard, so both
+        /// shapes stay consistent).
         var cacheReadInputTokens: Int?
 
         enum CodingKeys: String, CodingKey {
