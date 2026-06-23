@@ -237,6 +237,22 @@ struct ModelsHandler: Sendable {
             return jsonError(.badRequest, code: "invalid_request_error",
                               message: "expected {\"model\": \"<id>\", \"draft_model\": \"<id?>\"}: \(error)")
         }
+
+        // Preflight (issue #64) — resolve + validate the local model dir
+        // BEFORE the heavy MLX load. Gives the operator a structured 400/503
+        // with an actionable message instead of a generic
+        // `configurationDecodingError` that surfaces late from the loader.
+        // `.remote` (id is a hub id not yet on disk) falls through to the
+        // existing load path; we never fetch from the preflight.
+        do {
+            _ = try ModelPreflight.check(identifier: body.model)
+        } catch let prefError as ModelPreflight.Error {
+            return preflightErrorResponse(prefError)
+        } catch {
+            return jsonError(.internalServerError, code: "preflight_failed",
+                              message: "preflight raised an unexpected error: \(error)")
+        }
+
         let modelId = ModelLoader.canonicalIdentifier(body.model)
         let draftId = body.draft_model.map(ModelLoader.canonicalIdentifier)
         // beginLoad → ActivityTracker routes this into `recentLoads` (not
@@ -633,6 +649,46 @@ struct ModelsHandler: Sendable {
     }
 
     // MARK: - error helpers
+
+    /// Map a `ModelPreflight.Error` to a structured HTTP response. The
+    /// shard case is a 503 (transient — a download might still be in
+    /// flight); the rest are 400 with an actionable message naming the
+    /// failing path / config field. See `docs/MODEL-COMPATIBILITY.md` →
+    /// "Preflight failure codes" for the full contract.
+    private func preflightErrorResponse(_ err: ModelPreflight.Error) -> Response {
+        switch err {
+        case .shardsIncomplete(_, _, let missing):
+            // 503 — operator can retry once the download finishes.
+            let payload: [String: Any] = [
+                "error": [
+                    "type": "shards_incomplete",
+                    "code": "shards_incomplete",
+                    "message": err.description,
+                    "missing_shards": missing,
+                    "retryable": true,
+                ]
+            ]
+            let data = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data("{}".utf8)
+            return jsonResponse(.serviceUnavailable, data: data)
+        case .modelDirMissing:
+            return jsonError(.badRequest, code: "model_dir_missing", message: err.description)
+        case .configMissing:
+            return jsonError(.badRequest, code: "config_missing", message: err.description)
+        case .configParseFailed:
+            return jsonError(.badRequest, code: "config_parse_failed", message: err.description)
+        case .unsupportedModelType(_, _, let modelType):
+            let payload: [String: [String: String]] = [
+                "error": [
+                    "type": "unsupported_model_type",
+                    "code": "unsupported_model_type",
+                    "message": err.description,
+                    "model_type": modelType ?? "",
+                ]
+            ]
+            let data = (try? JSONEncoder().encode(payload)) ?? Data("{}".utf8)
+            return jsonResponse(.badRequest, data: data)
+        }
+    }
 
     private func insufficientMemoryError(
         neededBytes: Int64,
