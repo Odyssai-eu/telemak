@@ -262,9 +262,16 @@ struct AnthropicMessagesHandler: Sendable {
                 // total). `cache_read_input_tokens` reports session-cache
                 // reuse for Odysseus/Companion metrics — only present when
                 // > 0 so the shape stays minimal for cache-miss streams.
+                //
+                // Fallback: when `GenerateCompletionInfo` is nil (no
+                // `info` chunk arrived before the stream ended), use a
+                // char/4 estimate of the prompt rather than `0` — clients
+                // reading Anthropic usage on cache-miss / info-less
+                // streams previously got 0 input tokens, an obvious
+                // undercount vs the OpenAI path's `prompt_tokens_details`.
                 var usageBlock: [String: Any] = [
-                    "input_tokens": info?.promptTokenCount ?? 0,
-                    "output_tokens": info?.generationTokenCount ?? 0,
+                    "input_tokens": info?.promptTokenCount ?? max(1, prompt.count / 4),
+                    "output_tokens": info?.generationTokenCount ?? max(1, completion.count / 4),
                 ]
                 if cachedTokens > 0 {
                     usageBlock["cache_read_input_tokens"] = cachedTokens
