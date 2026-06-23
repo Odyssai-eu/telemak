@@ -239,7 +239,9 @@ struct ModelsHandler: Sendable {
         }
         let modelId = ModelLoader.canonicalIdentifier(body.model)
         let draftId = body.draft_model.map(ModelLoader.canonicalIdentifier)
-        let activityId = await activity.begin(model: modelId, phase: .loading)
+        // beginLoad → ActivityTracker routes this into `recentLoads` (not
+        // `recent_requests`) on finish/fail — see Engine/ActivityTracker.swift.
+        let activityId = await activity.beginLoad(model: modelId)
         let isEmbedder = EmbedderLoader.isEmbedder(identifier: modelId)
         if isEmbedder {
             if let draftId, !draftId.isEmpty {
