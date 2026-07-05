@@ -53,7 +53,7 @@ Ulysse      — memory of the journeys (RAG, future)
 
 **V1 — ready for use.** V0 shipped 2026-05-23 (commit `55ec3f6`); V1 (commits `60c9b9f`+) adds multi-model, KV cache reuse, capability contract, Anthropic `/v1/messages`, tool calls, CORS + bearer auth + CLI + menu-bar app.
 
-License : Apache 2.0 (planned, matches the rest of the OdyssAI stack).
+License : **GNU Affero General Public License v3.0** (AGPL-3.0) — see [LICENSE](LICENSE). Matches the rest of the OdyssAI stack.
 
 ## Quick start
 
