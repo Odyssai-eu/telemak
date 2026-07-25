@@ -78,6 +78,7 @@ extension ChatCompletionsHandler {
 
             let genStart = Date()
             var stopChecker = StopChecker(stops: stopSequences)
+            var thinkRepair = ThinkRepair()
             var info: GenerateCompletionInfo?
             var anyToolCalls = false
             var pendingContent = ""
@@ -121,7 +122,7 @@ extension ChatCompletionsHandler {
                         switch gen {
                         case .chunk(let piece):
                             await activity.incrementGeneratedTokens(activityId)
-                            let emit = stopChecker.feed(piece)
+                            let emit = thinkRepair.feed(stopChecker.feed(piece))
                             if !emit.isEmpty {
                                 pendingContent += emit
                                 pendingPieces += 1
@@ -149,7 +150,7 @@ extension ChatCompletionsHandler {
                     }
                 }
                 if !stopChecker.hit {
-                    let tail = stopChecker.flushRemaining()
+                    let tail = thinkRepair.feed(stopChecker.flushRemaining())
                     if !tail.isEmpty {
                         pendingContent += tail
                         pendingPieces += 1
@@ -254,6 +255,7 @@ extension ChatCompletionsHandler {
             let activityId = await activity.begin(model: modelId, phase: .prefill)
             let genStart = Date()
             var stopChecker = StopChecker(stops: stopSequences)
+            var thinkRepair = ThinkRepair()
             var info: GenerateCompletionInfo?
             var anyToolCalls = false
             var pendingContent = ""
@@ -309,7 +311,7 @@ extension ChatCompletionsHandler {
                         switch gen {
                         case .chunk(let piece):
                             await activity.incrementGeneratedTokens(activityId)
-                            let emit = stopChecker.feed(piece)
+                            let emit = thinkRepair.feed(stopChecker.feed(piece))
                             if !emit.isEmpty {
                                 pendingContent += emit
                                 pendingPieces += 1

@@ -263,6 +263,7 @@ struct ChatCompletionsHandler: Sendable {
                 collectedToolCalls = recovered.toolCalls
             }
         }
+        completion = ThinkRepair.repairComplete(completion)
 
         if let sessionId, let sessionStore {
             await SessionCachePersistence.save(
@@ -410,6 +411,7 @@ struct ChatCompletionsHandler: Sendable {
         if !collectedToolCalls.isEmpty {
             completion = cleanContentBeforeToolCall(completion)
         }
+        completion = ThinkRepair.repairComplete(completion)
 
         let promptTokens = info?.promptTokenCount ?? max(1, rawMessages.description.count / 4)
         let completionTokens = info?.generationTokenCount ?? max(1, completion.count / 4)
