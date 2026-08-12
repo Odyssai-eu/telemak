@@ -35,9 +35,9 @@ hdiutil create \
   -format UDZO \
   "$DMG"
 
-IDENTITY="${CODESIGN_IDENTITY:-Telemak Developer (Odyssai-eu)}"
+IDENTITY="${CODESIGN_IDENTITY:-Developer ID Application: Dupont Sophie (U2YXX868N2)}"
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then
-  codesign --sign "$IDENTITY" --force "$DMG"
+  codesign --sign "$IDENTITY" --force --timestamp "$DMG"
 fi
 
 rm -rf "$STAGING"

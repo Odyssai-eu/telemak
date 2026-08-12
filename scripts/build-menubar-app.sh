@@ -41,6 +41,23 @@ find "$ROOT/.xcbuild/Build/Products/$CONFIGURATION" -maxdepth 1 -name '*.bundle'
 done
 chmod 755 "$APP/Contents/MacOS/Telemak" "$APP/Contents/Resources/telemak" "$APP/Contents/Resources/telemak-menubar"
 
+# App icon: prefer a committed .icns; otherwise generate it from the 512px
+# source PNG so a checkout without iconutil artifacts still gets an icon.
+if [ -f "$ROOT/assets/AppIcon.icns" ]; then
+  cp "$ROOT/assets/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+elif [ -f "$ROOT/assets/AppIcon-src.png" ] && command -v iconutil >/dev/null 2>&1; then
+  ICONSET="$(mktemp -d)/AppIcon.iconset"
+  mkdir -p "$ICONSET"
+  for spec in 16:icon_16x16 32:icon_16x16@2x 32:icon_32x32 64:icon_32x32@2x \
+              128:icon_128x128 256:icon_128x128@2x 256:icon_256x256 \
+              512:icon_256x256@2x 512:icon_512x512 1024:icon_512x512@2x; do
+    px="${spec%%:*}"; name="${spec##*:}"
+    sips -z "$px" "$px" "$ROOT/assets/AppIcon-src.png" --out "$ICONSET/$name.png" >/dev/null 2>&1
+  done
+  iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns" 2>/dev/null || true
+  rm -rf "$(dirname "$ICONSET")"
+fi
+
 VERSION="$(sed -n 's/^public let telemakVersion = "\(.*\)"/\1/p' "$ROOT/Sources/TelemakVersion/Version.swift")"
 if [ -z "$VERSION" ]; then
   VERSION="0.0.0"
@@ -63,6 +80,8 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <string>6.0</string>
     <key>CFBundleName</key>
     <string>Telemak</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -112,12 +131,16 @@ EOF
 chmod 755 "$APP/Contents/Resources/uninstall.sh"
 
 if [ "$CONFIGURATION" = "Release" ]; then
-  IDENTITY="${CODESIGN_IDENTITY:-Telemak Developer (Odyssai-eu)}"
+  # Distributable .app is signed with a real Apple Developer ID so Gatekeeper
+  # accepts it on end-user machines (the self-signed "Telemak Developer" cert
+  # stays the default only for the .29 headless server binary in build.sh,
+  # where it is trust-anchored for TCC). Override with CODESIGN_IDENTITY.
+  IDENTITY="${CODESIGN_IDENTITY:-Developer ID Application: Dupont Sophie (U2YXX868N2)}"
   if security find-identity -v -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then
     echo "signing Telemak.app with identity '$IDENTITY'"
-    codesign --sign "$IDENTITY" --force --options runtime "$APP/Contents/Resources/telemak"
-    codesign --sign "$IDENTITY" --force --options runtime "$APP/Contents/Resources/telemak-menubar"
-    codesign --sign "$IDENTITY" --force --options runtime --deep "$APP"
+    codesign --sign "$IDENTITY" --force --options runtime --timestamp "$APP/Contents/Resources/telemak"
+    codesign --sign "$IDENTITY" --force --options runtime --timestamp "$APP/Contents/Resources/telemak-menubar"
+    codesign --sign "$IDENTITY" --force --options runtime --timestamp --deep "$APP"
   else
     echo "warning: codesign identity '$IDENTITY' not found; app bundle remains ad-hoc/unsigned"
   fi
