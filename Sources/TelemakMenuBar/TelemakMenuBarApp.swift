@@ -50,11 +50,21 @@ struct TelemakMenuBarApp: App {
 
         let s = Settings()
         _settings = StateObject(wrappedValue: s)
-        _poller = StateObject(wrappedValue: HealthPoller(settings: s))
+        let p = HealthPoller(settings: s)
+        _poller = StateObject(wrappedValue: p)
         let skipInstaller = ProcessInfo.processInfo.environment["TELEMAK_SKIP_INSTALLER"] == "1"
         if !skipInstaller && TelemakInstaller.isInstalled == false {
             DispatchQueue.main.async {
                 InstallerWindowController.shared.show()
+            }
+        } else {
+            // Single-app model: the menu-bar app owns the engine lifecycle.
+            // On launch, revive the local daemon if it's installed but down,
+            // so "start the app" == "engine up + UI up". The daemon stays a
+            // separate LaunchAgent (robust, insulated from GUI/WindowServer
+            // faults) — the app adopts it rather than embedding it.
+            DispatchQueue.main.async {
+                p.ensureLocalServiceRunning()
             }
         }
     }
@@ -608,6 +618,19 @@ final class HealthPoller: ObservableObject {
     }
 
     // MARK: - Service control
+
+    /// Single-app model: called once on launch. If the endpoint is local and
+    /// the daemon is installed but not running, bootstrap it so launching the
+    /// app brings the engine up. No-op when the daemon is already running
+    /// (the normal case — its LaunchAgent has RunAtLoad), when pointing at a
+    /// remote endpoint, or when nothing is installed yet (the first-run
+    /// installer owns that path). Effectively a self-heal on app launch.
+    func ensureLocalServiceRunning() {
+        guard settings.endpointIsLocal else { return }
+        refreshAgentState()
+        guard agentState == .stopped else { return }
+        startService()
+    }
 
     func startService() {
         do {
