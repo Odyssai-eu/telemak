@@ -7,6 +7,7 @@ import TelemakVersion
 @main
 struct TelemakMenuBarApp: App {
     @StateObject private var settings = Settings()
+    @StateObject private var engine: EngineController
     @StateObject private var poller: HealthPoller
 
     init() {
@@ -50,23 +51,14 @@ struct TelemakMenuBarApp: App {
 
         let s = Settings()
         _settings = StateObject(wrappedValue: s)
-        let p = HealthPoller(settings: s)
+        let e = EngineController(settings: s)
+        _engine = StateObject(wrappedValue: e)
+        let p = HealthPoller(settings: s, engine: e)
         _poller = StateObject(wrappedValue: p)
-        let skipInstaller = ProcessInfo.processInfo.environment["TELEMAK_SKIP_INSTALLER"] == "1"
-        if !skipInstaller && TelemakInstaller.isInstalled == false {
-            DispatchQueue.main.async {
-                InstallerWindowController.shared.show()
-            }
-        } else {
-            // Single-app model: the menu-bar app owns the engine lifecycle.
-            // On launch, revive the local daemon if it's installed but down,
-            // so "start the app" == "engine up + UI up". The daemon stays a
-            // separate LaunchAgent (robust, insulated from GUI/WindowServer
-            // faults) — the app adopts it rather than embedding it.
-            DispatchQueue.main.async {
-                p.ensureLocalServiceRunning()
-            }
-        }
+        // The app IS Telemak: launch the app, the engine runs; quit the app,
+        // the engine stops (EngineController observes willTerminate). No
+        // launchd, no installer — the engine is a child process of the app.
+        DispatchQueue.main.async { e.start() }
     }
 
     var body: some Scene {
@@ -492,11 +484,13 @@ final class HealthPoller: ObservableObject {
     @Published var modelsDirManaged: Bool = false
 
     let settings: Settings
+    let engine: EngineController
     private var timer: Timer?
 
-    init(settings: Settings) {
+    init(settings: Settings, engine: EngineController) {
         self.settings = settings
-        // Re-evaluate agent state immediately + start polling.
+        self.engine = engine
+        // Re-evaluate engine state immediately + start polling.
         refreshAgentState()
         Task { @MainActor in await self.refresh() }
         timer = Timer.scheduledTimer(withTimeInterval: settings.pollInterval, repeats: true) { [weak self] _ in
@@ -513,7 +507,7 @@ final class HealthPoller: ObservableObject {
     // lifetime as a @StateObject so it never deallocates early.
 
     func refreshAgentState() {
-        agentState = LaunchAgentControl.state()
+        agentState = engine.isRunning ? .running : .stopped
     }
 
     func refresh() async {
@@ -619,58 +613,33 @@ final class HealthPoller: ObservableObject {
 
     // MARK: - Service control
 
-    /// Single-app model: called once on launch. If the endpoint is local and
-    /// the daemon is installed but not running, bootstrap it so launching the
-    /// app brings the engine up. No-op when the daemon is already running
-    /// (the normal case — its LaunchAgent has RunAtLoad), when pointing at a
-    /// remote endpoint, or when nothing is installed yet (the first-run
-    /// installer owns that path). Effectively a self-heal on app launch.
-    func ensureLocalServiceRunning() {
-        guard settings.endpointIsLocal else { return }
-        refreshAgentState()
-        guard agentState == .stopped else { return }
-        startService()
-    }
-
     func startService() {
-        do {
-            try LaunchAgentControl.start()
-            lastError = nil
-            Task { @MainActor in
-                try? await Task.sleep(for: .seconds(2))
-                refreshAgentState()
-                await refresh()
-            }
-        } catch {
-            lastError = error.localizedDescription
+        engine.start()
+        lastError = nil
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
+            refreshAgentState()
+            await refresh()
         }
     }
 
     func stopService() {
-        do {
-            try LaunchAgentControl.stop()
-            lastError = nil
-            Task { @MainActor in
-                try? await Task.sleep(for: .seconds(1))
-                refreshAgentState()
-                await refresh()
-            }
-        } catch {
-            lastError = error.localizedDescription
+        engine.stop()
+        lastError = nil
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1))
+            refreshAgentState()
+            await refresh()
         }
     }
 
     func restartService() {
-        do {
-            try LaunchAgentControl.kickstart()
-            lastError = nil
-            Task { @MainActor in
-                try? await Task.sleep(for: .seconds(3))
-                refreshAgentState()
-                await refresh()
-            }
-        } catch {
-            lastError = error.localizedDescription
+        engine.restart()
+        lastError = nil
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3))
+            refreshAgentState()
+            await refresh()
         }
     }
 }
@@ -896,6 +865,16 @@ struct MenuBarPopover: View {
                     Image(systemName: "arrow.triangle.2.circlepath")
                 }
                 .help("Refresh now")
+            }
+            if settings.endpointIsLocal {
+                Toggle(isOn: $settings.relaunchOnCrash) {
+                    Text("Relaunch engine on crash (empty)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .help("If the engine crashes, restart it without reloading models — so a model that crashes it can't loop.")
             }
             HStack(spacing: 8) {
                 Button {

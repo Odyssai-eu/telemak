@@ -7,6 +7,8 @@ final class Settings: ObservableObject {
     @AppStorage("endpoint") var endpoint: String = "http://127.0.0.1:8003"
     @AppStorage("dashboard") var dashboard: String = "http://localhost:8000/"
     @AppStorage("pollInterval") var pollInterval: Double = 2.0
+    /// When on, a crashed local engine is relaunched empty (see EngineController).
+    @AppStorage("relaunchOnCrash") var relaunchOnCrash: Bool = true
 
     init() {
         if let endpoint = ProcessInfo.processInfo.environment["TELEMAK_ENDPOINT"], !endpoint.isEmpty {
