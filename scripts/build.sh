@@ -10,7 +10,7 @@ DERIVED="${ROOT}/.xcbuild"
 
 cd "$ROOT"
 
-LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/telemak-build.XXXXXX.log")"
+LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/telemak-build.XXXXXX")"
 KEEP_LOG=0
 trap 'if [ "$KEEP_LOG" != "1" ]; then rm -f "$LOG_FILE"; fi' EXIT
 
@@ -21,6 +21,7 @@ xcodebuild \
   -sdk macosx \
   -destination 'generic/platform=macOS' \
   -skipMacroValidation \
+  -skipPackagePluginValidation \
   ENABLE_CODE_COVERAGE=NO \
   SWIFT_ENABLE_CODE_COVERAGE=NO \
   CLANG_ENABLE_CODE_COVERAGE=NO \
