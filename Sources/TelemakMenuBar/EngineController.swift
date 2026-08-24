@@ -59,7 +59,9 @@ final class EngineController: ObservableObject {
         let p = Process()
         p.executableURL = engineURL
         var args = ["serve", "--host", "0.0.0.0", "--port", port]
-        if freshNoReplay { args.append("--no-replay") }
+        // `freshNoReplay` (post-crash) or the operator opted out of the
+        // state.json replay — start the engine empty.
+        if freshNoReplay || !settings.reloadLastModelOnStart { args.append("--no-replay") }
         p.arguments = args
         // B2 — engine generation defaults: pass the app's @AppStorage values
         // down as TELEMAK_* env vars so the server (ServerDefaults) uses them

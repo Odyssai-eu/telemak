@@ -23,6 +23,15 @@ final class Settings: ObservableObject {
     /// 0 = template default (not set), 1 = on, 2 = off.
     @AppStorage("defaultEnableThinking") var defaultEnableThinking: Int = 0
 
+    // Lifecycle (B4).
+    /// Register the app as a macOS login item via SMAppService. Only
+    /// effective when the app bundle lives in /Applications.
+    @AppStorage("launchAtLogin") var launchAtLogin: Bool = false
+    /// Opt-out for the boot-time state replay: when off, the engine is
+    /// spawned with `--no-replay` and starts empty instead of replaying
+    /// ~/.telemak/state.json. Applies at the next engine start.
+    @AppStorage("reloadLastModelOnStart") var reloadLastModelOnStart: Bool = true
+
     init() {
         if let endpoint = ProcessInfo.processInfo.environment["TELEMAK_ENDPOINT"], !endpoint.isEmpty {
             self.endpoint = endpoint

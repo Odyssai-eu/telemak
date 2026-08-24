@@ -1,7 +1,9 @@
+import ServiceManagement
 import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var settings: Settings
+    @State private var loginItemStatus: SMAppService.Status = .notRegistered
 
     var body: some View {
         Form {
@@ -28,9 +30,24 @@ struct SettingsView: View {
                     .foregroundColor(.secondary)
             }
             engineDefaultsSection
+            lifecycleSection
         }
         .formStyle(.grouped)
         .padding(16)
+        .onAppear { reconcileLoginItem() }
+    }
+
+    /// Reconcile the stored toggle with the actual SMAppService status:
+    /// the system may lose or revoke the registration (OS update, app
+    /// reinstall) without the app seeing a toggle flip.
+    private func reconcileLoginItem() {
+        loginItemStatus = SMAppService.mainApp.status
+        switch loginItemStatus {
+        case .enabled, .requiresApproval:
+            settings.launchAtLogin = true
+        default:
+            settings.launchAtLogin = false
+        }
     }
 
     // B2 — engine generation defaults. Injected into the local engine's
@@ -68,5 +85,87 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
         }
+    }
+
+    // B4 — app + engine lifecycle.
+    private var lifecycleSection: some View {
+        Section("Lifecycle") {
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("Launch Telemak at login", isOn: launchAtLoginBinding)
+                    .disabled(!appIsInApplications)
+                Text(launchAtLoginCaption)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                if loginItemStatus == .requiresApproval {
+                    Button("Open System Settings → Login Items") {
+                        SMAppService.openSystemSettingsLoginItems()
+                    }
+                    .buttonStyle(.link)
+                    .font(.caption)
+                }
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("Reload last model on start", isOn: $settings.reloadLastModelOnStart)
+                Text("Server reads ~/.telemak/state.json at boot and replays model loads. Disable to start empty. Applies at the next engine start.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("Relaunch engine on crash", isOn: $settings.relaunchOnCrash)
+                Text("Respawn the engine without replaying state.json after an unexpected exit (breaks crash loops).")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    // SMAppService registers the login item from the running bundle's path;
+    // outside /Applications (dev builds) the registration has no durable
+    // effect, so surface it instead of a broken toggle. Accept both
+    // /Applications and ~/Applications; reject App Translocation paths.
+    private var appIsInApplications: Bool {
+        let bundlePath = Bundle.main.bundleURL.path
+        let homeApplications = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Applications").path
+        return bundlePath.hasPrefix("/Applications/")
+            || bundlePath.hasPrefix(homeApplications + "/")
+    }
+
+    private var launchAtLoginCaption: String {
+        if !appIsInApplications {
+            return "Requires the app in /Applications or ~/Applications — move Telemak.app there first."
+        }
+        switch loginItemStatus {
+        case .requiresApproval:
+            return "Approval required in System Settings → Login Items."
+        case .enabled:
+            return "Registers the app as a macOS login item."
+        case .notRegistered:
+            return "Not registered as a login item."
+        case .notFound:
+            return "Login item not found (may have been removed)."
+        @unknown default:
+            return "Unknown login item status."
+        }
+    }
+
+    private var launchAtLoginBinding: Binding<Bool> {
+        Binding(
+            get: { settings.launchAtLogin },
+            set: { enabled in
+                if enabled {
+                    try? SMAppService.mainApp.register()
+                } else {
+                    try? SMAppService.mainApp.unregister()
+                }
+                loginItemStatus = SMAppService.mainApp.status
+                switch loginItemStatus {
+                case .enabled, .requiresApproval:
+                    settings.launchAtLogin = true
+                default:
+                    settings.launchAtLogin = false
+                }
+            }
+        )
     }
 }
