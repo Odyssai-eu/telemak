@@ -12,12 +12,21 @@ import MLXRandom
 // speculative iterator instead of `MLXLMCommon.ChatSession`. This file
 // is the integration glue.
 //
-// The iterator path skips a few features the regular path supports — tool
-// calls, vision images, the on-disk prompt cache — because the draft
-// can't propose tool calls or vision tokens, and the cache snapshot/replay
+// The iterator path skips a few features the regular path supports —
+// vision images and the on-disk prompt cache — because the draft
+// can't propose vision tokens, and the cache snapshot/replay
 // would interfere with the fork's `targetVerify`/`rollbackSpeculativeCache`
 // semantics. Whenever a caller would need those features, the regular
 // `ChatSession` path is used as a fall-through (no regression).
+//
+// Tool specs are NOT excluded anymore: when the caller forwards them they
+// are rendered into the chat template via `UserInput(tools:)` (same
+// rendering the regular `ChatSession` path applies), so the model sees
+// the tool definitions at speculative speed. Tool-call recovery on the
+// emitted text runs on the response-parsing side (A3): `recoverToolCalls`
+// lives in ChatCompletions.swift and is applied to both MTP responses
+// below, so a `<tool_call>` block emitted as plain text is converted to
+// a structured `tool_calls` payload instead of being dumped verbatim.
 //
 // Companion's user-facing speedup metric comes from this file: with a
 // draft paired, `/v1/chat/completions` produces fewer real-target forward
@@ -34,10 +43,10 @@ extension ChatCompletionsHandler {
         toolSpecs: [[String: any Sendable]]?,
         imageBatch: VisionImageBatch
     ) async -> ModelRegistry.LoadedDraft? {
-        // Tools and images can't be expressed through the speculative
-        // iterator's token-only interface — fall through to ChatSession
-        // when either is present.
-        if let toolSpecs, !toolSpecs.isEmpty { return nil }
+        // Images can't be expressed through the speculative iterator's
+        // token-only interface — fall through to ChatSession when present.
+        // Tool specs are allowed: the chat template renders them into the
+        // prompt and the iterator processes them as regular tokens.
         if !imageBatch.images.isEmpty { return nil }
 
         guard let draftId = await registry.draftId(for: modelId),
@@ -63,7 +72,8 @@ extension ChatCompletionsHandler {
         stopSequences: [String],
         stream: Bool,
         seed: UInt64?,
-        cachedTokens: Int
+        cachedTokens: Int,
+        toolSpecs: [[String: any Sendable]]? = nil
     ) async throws -> Response {
         if let seed { MLXRandom.seed(seed) }
 
@@ -85,7 +95,8 @@ extension ChatCompletionsHandler {
                 chatText: chatText,
                 params: params,
                 stopSequences: stopSequences,
-                cachedTokens: cachedTokens
+                cachedTokens: cachedTokens,
+                toolSpecs: toolSpecs
             )
         }
 
@@ -96,7 +107,8 @@ extension ChatCompletionsHandler {
             chatText: chatText,
             params: params,
             stopSequences: stopSequences,
-            cachedTokens: cachedTokens
+            cachedTokens: cachedTokens,
+            toolSpecs: toolSpecs
         )
     }
 
@@ -109,14 +121,15 @@ extension ChatCompletionsHandler {
         chatText: String,
         params: GenerateParameters,
         stopSequences: [String],
-        cachedTokens: Int
+        cachedTokens: Int,
+        toolSpecs: [[String: any Sendable]]?
     ) async throws -> Response {
         let genStart = Date()
         let activityId = await activity.begin(model: modelId, phase: .prefill)
         let result: MTPRunResult
         do {
             result = try await container.perform { ctx in
-                let promptTokens = try await prepareMTPPrompt(ctx: ctx, chatText: chatText)
+                let promptTokens = try await prepareMTPPrompt(ctx: ctx, chatText: chatText, toolSpecs: toolSpecs)
                 guard !promptTokens.isEmpty else {
                     throw HTTPError(.badRequest, message: "empty prompt after tokenization")
                 }
@@ -138,6 +151,13 @@ extension ChatCompletionsHandler {
         await activity.finish(activityId)
         await stats.recordRequest(tokens: result.tokensGenerated, elapsedSeconds: elapsed)
 
+        // A3 — tool-call recovery: models without native ToolCall events
+        // emit tagged text blocks; recover them into a structured payload
+        // instead of leaking the raw envelope into `content`.
+        let recovery = ChatCompletionsHandler.recoverToolCalls(from: result.text)
+        let hasToolCalls = !recovery.toolCalls.isEmpty
+        let contentOut = hasToolCalls ? (recovery.content.isEmpty ? nil : recovery.content) : result.text
+
         let response = ChatCompletionResponse(
             id: "chatcmpl-\(UUID().uuidString.lowercased())",
             object: "chat.completion",
@@ -146,8 +166,8 @@ extension ChatCompletionsHandler {
             choices: [
                 .init(
                     index: 0,
-                    message: ChatMessage(role: "assistant", content: result.text, toolCalls: nil),
-                    finishReason: "stop"
+                    message: ChatMessage(role: "assistant", content: contentOut, toolCalls: hasToolCalls ? recovery.toolCalls : nil),
+                    finishReason: hasToolCalls ? "tool_calls" : "stop"
                 )
             ],
             usage: ChatCompletionResponse.Usage(
@@ -187,7 +207,8 @@ extension ChatCompletionsHandler {
         chatText: String,
         params: GenerateParameters,
         stopSequences: [String],
-        cachedTokens: Int
+        cachedTokens: Int,
+        toolSpecs: [[String: any Sendable]]?
     ) -> Response {
         let id = "chatcmpl-\(UUID().uuidString.lowercased())"
         let created = Int(Date().timeIntervalSince1970)
@@ -215,7 +236,7 @@ extension ChatCompletionsHandler {
 
             do {
                 let result: MTPStreamingResult = try await container.perform { ctx in
-                    let promptTokens = try await prepareMTPPrompt(ctx: ctx, chatText: chatText)
+                    let promptTokens = try await prepareMTPPrompt(ctx: ctx, chatText: chatText, toolSpecs: toolSpecs)
                     guard !promptTokens.isEmpty else {
                         throw HTTPError(.badRequest, message: "empty prompt after tokenization")
                     }
@@ -238,24 +259,51 @@ extension ChatCompletionsHandler {
                 visiblePieces = result.pieces
                 await activity.setGeneratedTokens(activityId, completionTokenCount)
 
-                // Emit each piece as its own SSE chunk so the client sees
-                // a stream-shaped delta sequence even though the work is
-                // already done. UI behaviour is identical to a real-time
-                // stream of the same payload size.
-                for piece in visiblePieces where !piece.isEmpty {
-                    await activity.setPhase(activityId, .streaming)
-                    let chunk = ChatCompletionChunk(
-                        id: id, object: "chat.completion.chunk",
-                        created: created, model: modelId,
-                        choices: [.init(index: 0, delta: .init(role: nil, content: piece), finishReason: nil)]
-                    )
-                    try await send(chunk)
+                // A3 — tool-call recovery. All pieces are already buffered
+                // (the work finished above), so run recovery on the joined
+                // text before emitting: recovered content goes out as
+                // content deltas, recovered calls as tool_calls deltas —
+                // same chunk shape as the regular streaming path.
+                let recovery = ChatCompletionsHandler.recoverToolCalls(from: visiblePieces.joined())
+                let anyToolCalls = !recovery.toolCalls.isEmpty
+                if anyToolCalls {
+                    if !recovery.content.isEmpty {
+                        await activity.setPhase(activityId, .streaming)
+                        let chunk = ChatCompletionChunk(
+                            id: id, object: "chat.completion.chunk",
+                            created: created, model: modelId,
+                            choices: [.init(index: 0, delta: .init(role: nil, content: recovery.content), finishReason: nil)]
+                        )
+                        try await send(chunk)
+                    }
+                    for call in recovery.toolCalls {
+                        let chunk = ChatCompletionChunk(
+                            id: id, object: "chat.completion.chunk",
+                            created: created, model: modelId,
+                            choices: [.init(index: 0, delta: .init(role: nil, content: nil, toolCalls: [call]), finishReason: nil)]
+                        )
+                        try await send(chunk)
+                    }
+                } else {
+                    // Emit each piece as its own SSE chunk so the client sees
+                    // a stream-shaped delta sequence even though the work is
+                    // already done. UI behaviour is identical to a real-time
+                    // stream of the same payload size.
+                    for piece in visiblePieces where !piece.isEmpty {
+                        await activity.setPhase(activityId, .streaming)
+                        let chunk = ChatCompletionChunk(
+                            id: id, object: "chat.completion.chunk",
+                            created: created, model: modelId,
+                            choices: [.init(index: 0, delta: .init(role: nil, content: piece), finishReason: nil)]
+                        )
+                        try await send(chunk)
+                    }
                 }
 
                 let stop = ChatCompletionChunk(
                     id: id, object: "chat.completion.chunk",
                     created: created, model: modelId,
-                    choices: [.init(index: 0, delta: .init(role: nil, content: nil), finishReason: "stop")]
+                    choices: [.init(index: 0, delta: .init(role: nil, content: nil), finishReason: anyToolCalls ? "tool_calls" : "stop")]
                 )
                 try await send(stop)
 
@@ -307,12 +355,18 @@ extension ChatCompletionsHandler {
 
     /// Tokenize through the model's processor — identical to what
     /// `/admin/mtp/smoke` does — so the chat template applied lines up
-    /// with what the draft was trained against.
+    /// with what the draft was trained against. Tool specs, when present,
+    /// ride into the template via `UserInput(tools:)` exactly like the
+    /// regular `ChatSession` path, so the model sees the same tool
+    /// definitions in both paths.
     private func prepareMTPPrompt(
         ctx: ModelContext,
-        chatText: String
+        chatText: String,
+        toolSpecs: [[String: any Sendable]]? = nil
     ) async throws -> [Int] {
-        let input = try await ctx.processor.prepare(input: UserInput(prompt: chatText))
+        let input = try await ctx.processor.prepare(
+            input: UserInput(prompt: chatText, tools: toolSpecs)
+        )
         let tokenArray = input.text.tokens.reshaped(-1).asType(.int32)
         eval(tokenArray)
         return tokenArray.asArray(Int32.self).map(Int.init)

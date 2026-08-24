@@ -10,13 +10,20 @@ import MLXLMCommon
 //   - `streamingResponse` — the canonical OpenAI chat stream for plain
 //     text / tool-less / single-history requests. Uses `ChatSession`.
 //   - `streamingStructuredMessagesResponse` — for tool-history requests
-//     where the body has `tool` messages or `tool_calls`; goes through
-//     the raw-message `MLXLMCommon.generate` path so the chat template
-//     sees the exact tool transcript.
+//     where the body has `tool` messages or `tool_calls`. A1 KV-bridge:
+//     receives a fully assembled `ChatSession` (KV cache rehydrated by
+//     the caller) and streams only the delta prompt through it.
 //
 // Both share `SSEWriter` for the wire framing (so the byte-level
 // output is identical to the pre-refactor code) and
 // `SessionCachePersistence` for the post-stream save.
+
+/// Single-consumer handoff box for values that are Sendable in
+/// practice (created by the caller, owned and used sequentially by one
+/// streaming body) but not declared so. Mirrors `VisionImageBatch`.
+private struct UncheckedSendableBox<T>: @unchecked Sendable {
+    let value: T
+}
 
 extension ChatCompletionsHandler {
 
@@ -233,20 +240,34 @@ extension ChatCompletionsHandler {
     }
 
     // MARK: - structured-messages streaming (with tool history)
+    //
+    // A1 — KV-bridge: the session arrives fully assembled by the caller
+    // (cache-hit KV rehydrate or history rehydrate), so this path only
+    // streams the delta prompt through `session.streamDetails`, reports
+    // `cached_tokens` in the usage chunk, and persists the grown cache
+    // for the next tool turn. Mirrors `streamingResponse` above.
 
     func streamingStructuredMessagesResponse(
         container: ModelContainer,
-        rawMessages: [[String: any Sendable]],
+        session: ChatSession,
+        prompt: String,
+        cachedTokens: Int,
+        role: Chat.Message.Role,
         params: GenerateParameters,
         modelId: String,
         stopSequences: [String],
         toolSpecs: [[String: any Sendable]]?,
-        additionalContext: [String: any Sendable]?
+        additionalContext: [String: any Sendable]?,
+        sessionId: String?,
+        sessionStore: SessionStore?,
+        sessionCacheScope: String
     ) -> Response {
         let id = "chatcmpl-\(UUID().uuidString.lowercased())"
         let created = Int(Date().timeIntervalSince1970)
 
+        let boxedSession = UncheckedSendableBox(value: session)
         let body = ResponseBody(contentLength: nil) { writer in
+            let session = boxedSession.value
             let sse = SSEWriter(writer: writer)
             func send(_ chunk: ChatCompletionChunk) async throws {
                 try await sse.write(data: chunk)
@@ -293,21 +314,9 @@ extension ChatCompletionsHandler {
                     choices: [.init(index: 0, delta: .init(role: "assistant", content: nil), finishReason: nil)]
                 ))
 
-                let input = UserInput(
-                    messages: rawMessages,
-                    tools: toolSpecs,
-                    additionalContext: additionalContext
-                )
-                let stream = try await makeRawGenerationStream(
-                    container: container,
-                    input: input,
-                    params: params,
-                    toolSpecs: toolSpecs
-                )
-
                 await activity.setPhase(activityId, .decode)
                 try await runWithOptionalWiredLimit {
-                    for await gen in stream {
+                    for try await gen in session.streamDetails(to: prompt, role: role, images: [], videos: []) {
                         switch gen {
                         case .chunk(let piece):
                             await activity.incrementGeneratedTokens(activityId)
@@ -356,19 +365,23 @@ extension ChatCompletionsHandler {
                     choices: [.init(index: 0, delta: .init(role: nil, content: nil), finishReason: finishReason)]
                 ))
 
-                let promptTokens = info?.promptTokenCount ?? max(1, rawMessages.description.count / 4)
+                let promptTokens = info?.promptTokenCount ?? max(1, prompt.count / 4)
                 let completionTokens = info?.generationTokenCount ?? 1
+                var usageBlock: [String: Any] = [
+                    "prompt_tokens": promptTokens,
+                    "completion_tokens": completionTokens,
+                    "total_tokens": promptTokens + completionTokens,
+                ]
+                if cachedTokens > 0 {
+                    usageBlock["prompt_tokens_details"] = ["cached_tokens": cachedTokens]
+                }
                 let usageChunk: [String: Any] = [
                     "id": id,
                     "object": "chat.completion.chunk",
                     "created": created,
                     "model": modelId,
                     "choices": [],
-                    "usage": [
-                        "prompt_tokens": promptTokens,
-                        "completion_tokens": completionTokens,
-                        "total_tokens": promptTokens + completionTokens,
-                    ],
+                    "usage": usageBlock,
                 ]
                 try await sse.write(data: usageChunk)
                 try await sse.writeDone()
@@ -382,6 +395,17 @@ extension ChatCompletionsHandler {
             await activity.setGeneratedTokens(activityId, observedTokens)
             await activity.finish(activityId)
             await stats.recordRequest(tokens: observedTokens, elapsedSeconds: elapsed)
+
+            if let sessionId, let sessionStore {
+                await SessionCachePersistence.save(
+                    session: session,
+                    sessionId: sessionId,
+                    modelId: modelId,
+                    cacheScope: sessionCacheScope,
+                    sessionStore: sessionStore
+                )
+            }
+
             try await writer.finish(nil)
         }
 
