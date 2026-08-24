@@ -38,11 +38,7 @@ struct DashboardView: View {
             case .models:
                 ModelsWindow(poller: poller, settings: settings)
             case .chat:
-                ContentUnavailableView {
-                    Label("Chat", systemImage: "bubble.left.and.bubble.right")
-                } description: {
-                    Text("Chat minimaliste — à venir (B3)")
-                }
+                ChatView(settings: settings)
             case .settings:
                 SettingsView(settings: settings)
             }
