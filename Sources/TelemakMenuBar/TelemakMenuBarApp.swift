@@ -79,6 +79,13 @@ struct TelemakMenuBarApp: App {
                 .frame(width: 440, height: 220)
         }
         .windowResizability(.contentSize)
+
+        // Unified dashboard window (B1) — freely resizable, supports native
+        // fullscreen. Hosts Activity / Models / Chat / Settings.
+        Window("Telemak", id: "telemak-dashboard") {
+            DashboardView(poller: poller, settings: settings)
+                .frame(minWidth: 900, minHeight: 600)
+        }
     }
 }
 
@@ -877,6 +884,11 @@ struct MenuBarPopover: View {
                 .help("If the engine crashes, restart it without reloading models — so a model that crashes it can't loop.")
             }
             HStack(spacing: 8) {
+                Button {
+                    openWindow(id: "telemak-dashboard")
+                } label: {
+                    Label("Dashboard", systemImage: "rectangle.3.group")
+                }
                 Button {
                     ModelsWindowController.shared.show(poller: poller, settings: settings)
                 } label: {
