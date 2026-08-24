@@ -89,9 +89,11 @@ public actor ModelRegistry {
 
     public func perModelRamBytes() -> [String: Int64] {
         var out: [String: Int64] = [:]
-        for (id, entry) in entries { out[id] = entry.ramEstimateBytes }
-        for (id, entry) in draftEntries { out[id] = entry.ramEstimateBytes }
-        for (id, entry) in embedderEntries { out[id] = entry.ramEstimateBytes }
+        // Sum (not overwrite) so a main+draft pair under the same key
+        // (embedded MTP auto-pairing) reports total RAM for that model.
+        for (id, entry) in entries { out[id, default: 0] += entry.ramEstimateBytes }
+        for (id, entry) in draftEntries { out[id, default: 0] += entry.ramEstimateBytes }
+        for (id, entry) in embedderEntries { out[id, default: 0] += entry.ramEstimateBytes }
         return out
     }
 

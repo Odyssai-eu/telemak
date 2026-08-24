@@ -156,9 +156,17 @@ final class ModelsWindowController {
     }
 }
 
+struct LoadedModelInfo: Identifiable {
+    let id: String
+    let ramGB: Double?
+    let mtpStatus: String?
+    let mtpReason: String?
+}
+
 @MainActor
 final class ModelsWindowModel: ObservableObject {
     @Published var available: [String] = []
+    @Published var loadedModels: [LoadedModelInfo] = []
     @Published var modelsDirUnset = false
     @Published var status: String = ""
     @Published var dirField: String = ""
@@ -193,6 +201,87 @@ final class ModelsWindowModel: ObservableObject {
         } catch {
             status = "Could not list models: \(error.localizedDescription)"
         }
+        await refreshLoaded()
+    }
+
+    /// Merge GET /v1/models (loaded ids + MTP compatibility) with
+    /// GET /admin/memory (per_model RAM) into `loadedModels`.
+    func refreshLoaded() async {
+        guard let base = settings.endpointURL else { return }
+        var ram: [String: Double] = [:]
+        var mtp: [String: (status: String?, reason: String?)] = [:]
+        var ids: [String] = []
+        do {
+            let (data, _) = try await URLSession.shared.data(
+                for: authed(base.appendingPathComponent("/admin/memory")))
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+            let perModel = json["per_model"] as? [String: Any] ?? [:]
+            for (id, gb) in perModel { ram[id] = (gb as? Double) ?? Double(truncating: gb as? NSNumber ?? 0) }
+        } catch {}
+        do {
+            let (data, _) = try await URLSession.shared.data(
+                for: authed(base.appendingPathComponent("/v1/models")))
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+            let entries = json["data"] as? [[String: Any]] ?? []
+            for entry in entries {
+                guard let id = entry["id"] as? String else { continue }
+                ids.append(id)
+                let ext = entry["x_telemak"] as? [String: Any]
+                let mtpJson = ext?["mtp"] as? [String: Any]
+                mtp[id] = (
+                    status: mtpJson?["status"] as? String,
+                    reason: mtpJson?["reason"] as? String
+                )
+            }
+        } catch {
+            status = "Could not list loaded models: \(error.localizedDescription)"
+        }
+        loadedModels = ids.sorted().map { id in
+            LoadedModelInfo(
+                id: id,
+                ramGB: ram[id],
+                mtpStatus: mtp[id]?.status,
+                mtpReason: mtp[id]?.reason
+            )
+        }
+    }
+
+    func unload(_ id: String) async {
+        guard let base = settings.endpointURL else { return }
+        status = "Unloading \(id)…"
+        let body = try? JSONSerialization.data(withJSONObject: ["model": id])
+        do {
+            let (data, resp) = try await URLSession.shared.data(
+                for: authed(base.appendingPathComponent("/admin/unload"), method: "POST", body: body))
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+            if code == 200 {
+                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                let statusStr = json?["status"] as? String
+                status = statusStr == "noop" ? "\(id) was not loaded" : "Unloaded \(id)"
+            } else {
+                status = "Unload failed (HTTP \(code))"
+            }
+        } catch {
+            status = "Unload failed: \(error.localizedDescription)"
+        }
+        await refreshLoaded()
+    }
+
+    func unloadAll() async {
+        guard let base = settings.endpointURL else { return }
+        status = "Unloading all models…"
+        var components = URLComponents(url: base.appendingPathComponent("/admin/unload"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "all", value: "true")]
+        guard let url = components?.url else { return }
+        do {
+            let (_, resp) = try await URLSession.shared.data(
+                for: authed(url, method: "POST", body: Data("{}".utf8)))
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+            status = code == 200 ? "Unloaded all models" : "Unload failed (HTTP \(code))"
+        } catch {
+            status = "Unload failed: \(error.localizedDescription)"
+        }
+        await refreshLoaded()
     }
 
     func load(_ id: String) async {
@@ -207,6 +296,7 @@ final class ModelsWindowModel: ObservableObject {
         } catch {
             status = "Load failed: \(error.localizedDescription)"
         }
+        await refreshLoaded()
     }
 
     func setDir(create: Bool) async {
@@ -266,6 +356,58 @@ struct ModelsWindow: View {
 
             Divider()
 
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Loaded").font(.subheadline.weight(.semibold))
+                    Spacer()
+                    if !model.loadedModels.isEmpty {
+                        Button("Unload all") { Task { await model.unloadAll() } }
+                            .controlSize(.small)
+                    }
+                }
+                if model.loadedModels.isEmpty {
+                    Text("No model loaded.")
+                        .font(.callout).foregroundColor(.secondary)
+                } else {
+                    ForEach(model.loadedModels) { info in
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 8) {
+                                Text(info.id)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .lineLimit(1).truncationMode(.middle)
+                                Spacer()
+                                if let ram = info.ramGB {
+                                    Text(String(format: "%.1f GB", ram))
+                                        .font(.caption).monospacedDigit()
+                                        .foregroundColor(.secondary)
+                                }
+                                if let mtpStatus = info.mtpStatus {
+                                    Text(mtpStatus)
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundColor(
+                                            mtpStatus == "verified_embedded_mtp" ? .green
+                                                : mtpStatus == "unverified_embedded_mtp" ? .orange : .secondary
+                                        )
+                                        .padding(.horizontal, 5).padding(.vertical, 1)
+                                        .background(Capsule().fill(.quaternary))
+                                }
+                                Button("Unload") { Task { await model.unload(info.id) } }
+                                    .controlSize(.small)
+                            }
+                            if let reason = info.mtpReason, !reason.isEmpty {
+                                Text(reason)
+                                    .font(.caption2).foregroundColor(.secondary)
+                                    .lineLimit(2).truncationMode(.middle)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                    }
+                }
+            }
+
+            Divider()
+
             Text("Available").font(.subheadline.weight(.semibold))
             if model.modelsDirUnset {
                 Text("Set your models directory above to see available models.")
@@ -303,6 +445,7 @@ struct ModelsWindow: View {
         .padding(16)
         .frame(minWidth: 400, minHeight: 340)
         .onAppear { if model.dirField.isEmpty { model.dirField = poller.modelsDir ?? "" } }
+        .onReceive(poller.$modelsLoaded.removeDuplicates()) { _ in Task { await model.refreshLoaded() } }
     }
 }
 
