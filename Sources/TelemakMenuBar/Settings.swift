@@ -10,6 +10,19 @@ final class Settings: ObservableObject {
     /// When on, a crashed local engine is relaunched empty (see EngineController).
     @AppStorage("relaunchOnCrash") var relaunchOnCrash: Bool = true
 
+    // Engine generation defaults (B2). Injected into the child engine's
+    // environment at spawn time by EngineController; the server applies them
+    // as a base that request payloads can always override. Defaults match
+    // GenerateParameters / SessionStore so behaviour is unchanged until the
+    // operator touches them.
+    @AppStorage("defaultTemperature") var defaultTemperature: Double = 0.6
+    @AppStorage("defaultTopP") var defaultTopP: Double = 1.0
+    @AppStorage("defaultTopK") var defaultTopK: Int = 0
+    @AppStorage("defaultMaxSessions") var defaultMaxSessions: Int = 32
+    /// Tri-state so the template default is never forced:
+    /// 0 = template default (not set), 1 = on, 2 = off.
+    @AppStorage("defaultEnableThinking") var defaultEnableThinking: Int = 0
+
     init() {
         if let endpoint = ProcessInfo.processInfo.environment["TELEMAK_ENDPOINT"], !endpoint.isEmpty {
             self.endpoint = endpoint

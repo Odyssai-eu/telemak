@@ -45,6 +45,11 @@ struct ChatCompletionsHandler: Sendable {
         }
 
         var params = GenerateParameters()
+        // B2 — engine defaults from the environment (set by the app at
+        // spawn) as the base; payload fields below always win.
+        if let t = ServerDefaults.temperature { params.temperature = t }
+        if let p = ServerDefaults.topP { params.topP = p }
+        if let k = ServerDefaults.topK { params.topK = k }
         if let maxTokens = payload.maxTokens { params.maxTokens = maxTokens }
         if let temperature = payload.temperature { params.temperature = temperature }
         if let topP = payload.topP { params.topP = topP }
@@ -72,8 +77,12 @@ struct ChatCompletionsHandler: Sendable {
         }
 
         var templateContext: [String: any Sendable] = [:]
-        if let enableThinking = payload.enableThinking {
-            templateContext["enable_thinking"] = enableThinking
+        // B2 — payload wins; otherwise the engine default from the
+        // environment; never force a value when both are absent so the
+        // model's template default applies.
+        let effectiveThinking = payload.enableThinking ?? ServerDefaults.enableThinking
+        if let effectiveThinking {
+            templateContext["enable_thinking"] = effectiveThinking
         }
         if let reasoningEffort = payload.reasoningEffort, !reasoningEffort.isEmpty {
             templateContext["reasoning_effort"] = reasoningEffort

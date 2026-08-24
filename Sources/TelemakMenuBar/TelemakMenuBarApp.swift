@@ -76,7 +76,7 @@ struct TelemakMenuBarApp: App {
         // Settings window (opens via the gear button).
         Window("Telemak Settings", id: "telemak-settings") {
             SettingsView(settings: settings)
-                .frame(width: 440, height: 220)
+                .frame(width: 460, height: 560)
         }
         .windowResizability(.contentSize)
 
@@ -923,35 +923,4 @@ struct MenuBarPopover: View {
     }
 }
 
-struct SettingsView: View {
-    @ObservedObject var settings: Settings
-
-    var body: some View {
-        Form {
-            Section("Telemak endpoint") {
-                TextField("URL", text: $settings.endpoint)
-                    .textFieldStyle(.roundedBorder)
-                Text("e.g. `http://127.0.0.1:8003` (local) or `http://<host>:8003` (remote target). Start/Stop only works when local.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            Section("Dashboard URL") {
-                TextField("URL", text: $settings.dashboard)
-                    .textFieldStyle(.roundedBorder)
-                Text("Opens in your default browser. Default: Odysseus dashboard.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            Section("Poll interval") {
-                Slider(value: $settings.pollInterval, in: 1...10, step: 1) {
-                    Text("seconds")
-                }
-                Text("\(Int(settings.pollInterval))s between /health polls. Restart the app to apply.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-        }
-        .formStyle(.grouped)
-        .padding(16)
-    }
-}
+// SettingsView lives in SettingsView.swift (B2 — extracted + engine defaults section).

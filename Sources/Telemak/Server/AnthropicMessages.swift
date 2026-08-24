@@ -45,6 +45,11 @@ struct AnthropicMessagesHandler: Sendable {
 
         var params = GenerateParameters()
         params.maxTokens = payload.maxTokens
+        // B2 — engine defaults from the environment as the base; payload
+        // fields below always win.
+        if let t = ServerDefaults.temperature { params.temperature = t }
+        if let p = ServerDefaults.topP { params.topP = p }
+        if let k = ServerDefaults.topK { params.topK = k }
         if let t = payload.temperature { params.temperature = t }
         if let p = payload.topP { params.topP = p }
         if let k = payload.topK { params.topK = k }

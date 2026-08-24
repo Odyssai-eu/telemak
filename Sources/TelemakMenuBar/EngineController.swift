@@ -61,6 +61,22 @@ final class EngineController: ObservableObject {
         var args = ["serve", "--host", "0.0.0.0", "--port", port]
         if freshNoReplay { args.append("--no-replay") }
         p.arguments = args
+        // B2 — engine generation defaults: pass the app's @AppStorage values
+        // down as TELEMAK_* env vars so the server (ServerDefaults) uses them
+        // as a base under request payloads. The child inherits the parent
+        // environment plus these overrides.
+        var env = ProcessInfo.processInfo.environment
+        env["TELEMAK_DEFAULT_TEMPERATURE"] = String(settings.defaultTemperature)
+        env["TELEMAK_DEFAULT_TOP_P"] = String(settings.defaultTopP)
+        env["TELEMAK_DEFAULT_TOP_K"] = String(settings.defaultTopK)
+        env["TELEMAK_MAX_SESSIONS"] = String(settings.defaultMaxSessions)
+        if settings.defaultEnableThinking != 0 {
+            env["TELEMAK_DEFAULT_ENABLE_THINKING"] =
+                settings.defaultEnableThinking == 1 ? "1" : "0"
+        } else {
+            env["TELEMAK_DEFAULT_ENABLE_THINKING"] = nil
+        }
+        p.environment = env
         p.terminationHandler = { [weak self] proc in
             let status = proc.terminationStatus
             Task { @MainActor in self?.handleExit(status: status) }
