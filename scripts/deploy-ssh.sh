@@ -40,6 +40,7 @@ SERVER_PORT="${TELEMAK_SERVER_PORT:-8003}"
 
 SSH_TARGET="$USER@$HOST"
 SSH_ARGS="-p $SSH_PORT -o BatchMode=yes"
+SCP_ARGS="-P $SSH_PORT -o BatchMode=yes"
 # NOTE: $HOME must NOT expand locally — the remote HOME may differ (e.g.
 # local /Users/sophie vs remote /Users/admin). Resolve it in the remote
 # shell below via the REMOTE_DIR placeholder.
@@ -84,7 +85,7 @@ tar -C "$PRODUCTS" -czf "$TARBALL" \
 
 # --- 3. scp to the remote host ------------------------------------------
 say "uploading to $SSH_TARGET (port $SSH_PORT)..."
-scp $SSH_ARGS "$TARBALL" "$SSH_TARGET:/tmp/$(basename "$TARBALL")" \
+scp $SCP_ARGS "$TARBALL" "$SSH_TARGET:/tmp/$(basename "$TARBALL")" \
   || die "scp failed"
 
 # --- 4-5. Extract, strip quarantine, sign, restart on the host ------------
