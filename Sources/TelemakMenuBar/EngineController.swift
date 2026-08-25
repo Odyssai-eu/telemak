@@ -78,6 +78,9 @@ final class EngineController: ObservableObject {
         } else {
             env["TELEMAK_DEFAULT_ENABLE_THINKING"] = nil
         }
+        // Optional MTP enable flag – false (default) disables MTP, true enables it.
+        env["TELEMAK_DEFAULT_ENABLE_MTP"] = settings.defaultEnableMTP ? "1" : "0"
+
         p.environment = env
         p.terminationHandler = { [weak self] proc in
             let status = proc.terminationStatus

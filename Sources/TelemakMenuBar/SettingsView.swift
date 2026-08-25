@@ -76,11 +76,16 @@ struct SettingsView: View {
             Stepper(value: $settings.defaultMaxSessions, in: 1...128) {
                 Text("Max sessions: \(settings.defaultMaxSessions)")
             }
-            Picker("enable_thinking", selection: $settings.defaultEnableThinking) {
+                Picker("enable_thinking", selection: $settings.defaultEnableThinking) {
                 Text("Template default").tag(0)
                 Text("On").tag(1)
                 Text("Off").tag(2)
             }
+            // MTP fast path – OFF by default, experimental
+            Toggle(isOn: $settings.defaultEnableMTP) {
+                Text("Enable MTP fast path (experimental)")
+            }
+            .font(.caption)
             Text("Applied to the local engine at spawn. Restart the engine to apply.")
                 .font(.caption)
                 .foregroundColor(.secondary)

@@ -22,6 +22,7 @@ final class Settings: ObservableObject {
     /// Tri-state so the template default is never forced:
     /// 0 = template default (not set), 1 = on, 2 = off.
     @AppStorage("defaultEnableThinking") var defaultEnableThinking: Int = 0
+    @AppStorage("defaultEnableMTP") var defaultEnableMTP: Bool = false
 
     // Lifecycle (B4).
     /// Register the app as a macOS login item via SMAppService. Only

@@ -71,13 +71,20 @@ struct ModelsHandler: Sendable {
 
         let loaded = await registry.loadedModels
         let embedders = await registry.loadedEmbedders
-        let llmEntries = loaded.map {
-            ModelEntry(
-                id: $0.id,
-                object: "model",
-                created: Int($0.loadedAt.timeIntervalSince1970),
-                owned_by: "telemak",
-                xTelemak: .init(kind: $0.isVision ? "vlm" : "llm", mtp: $0.mtpCompatibility)
+        var llmEntries: [ModelEntry] = []
+        for entry in loaded {
+            let paired = await registry.draftId(for: entry.id) != nil
+            llmEntries.append(
+                ModelEntry(
+                    id: entry.id,
+                    object: "model",
+                    created: Int(entry.loadedAt.timeIntervalSince1970),
+                    owned_by: "telemak",
+                    xTelemak: .init(
+                        kind: entry.isVision ? "vlm" : "llm",
+                        mtp: ServerDefaults.enableMTP && paired ? entry.mtpCompatibility : MTPCompatibility.unavailable(modelId: entry.id)
+                    )
+                )
             )
         }
         let embedderEntries = embedders.map {
@@ -414,6 +421,11 @@ struct ModelsHandler: Sendable {
                 .badRequest, code: "invalid_request_error",
                 message: "expected {\"source\": \"<id>\", \"output\": \"<path?>\"}: \(error)")
         }
+        // Respect the server‑wide MTP enable flag – OFF by default.
+        guard ServerDefaults.enableMTP else {
+            return jsonError(.serviceUnavailable, code: "mtp_disabled",
+                             message: "MTP is disabled on this server; set TELEMAK_DEFAULT_ENABLE_MTP=1 to enable")
+        }
         // Validate source — must be a clean HuggingFace org/name ID.
         // Reject path separators, traversal sequences, and anything that
         // isn't a safe repo reference before it reaches the Python module.
@@ -527,6 +539,10 @@ struct ModelsHandler: Sendable {
             return jsonError(
                 .badRequest, code: "invalid_request_error",
                 message: "expected {\"model\":\"<id>\",\"prompt\":\"<text>\",\"max_tokens\":N}: \(error)")
+        }
+        guard ServerDefaults.enableMTP else {
+            return jsonError(.serviceUnavailable, code: "mtp_disabled",
+                             message: "MTP is disabled on this server; set TELEMAK_DEFAULT_ENABLE_MTP=1 to enable")
         }
         let mainId = body.model
         guard let main = await registry.get(mainId) else {

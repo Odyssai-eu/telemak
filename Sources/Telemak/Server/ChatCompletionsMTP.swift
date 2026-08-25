@@ -50,6 +50,10 @@ extension ChatCompletionsHandler {
         // prompt and the iterator processes them as regular tokens.
         if !imageBatch.images.isEmpty { return nil }
 
+        // Respect the server-wide MTP enable flag. When disabled (default),
+        // always fall back to the regular ChatSession path, even if a draft is loaded.
+        if !ServerDefaults.enableMTP { return nil }
+
         guard let draftId = await registry.draftId(for: modelId),
               let draft = await registry.getDraft(draftId)
         else { return nil }

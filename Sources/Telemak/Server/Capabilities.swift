@@ -140,7 +140,7 @@ struct CapabilitiesHandler: Sendable {
             SpeculativePair(main: $0.main, draft: $0.draft, mtp: $0.compatibility)
         }
         let speculative = SpeculativeCapability(
-            supported: !pairs.isEmpty,
+            supported: ServerDefaults.enableMTP && !pairs.isEmpty,
             modes: ["mtp_adapter", "embedded_head"],
             activePairs: pairs
         )
