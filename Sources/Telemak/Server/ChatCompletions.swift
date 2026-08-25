@@ -358,12 +358,6 @@ struct ChatCompletionsHandler: Sendable {
             )
         }
 
-        let instructions = Self.instructionsWithReasoningGuard(
-            base: payload.system ?? extractSystem(from: payload.messages),
-            modelId: modelId,
-            effort: payload.reasoningEffort
-        )
-
         // A1 — KV-bridge: reuse SessionStore to prefill only the delta
         let sessionId = payload.sessionId ?? request.headers[.init("X-Session-Id")!]
         let cacheHit: URL? = await {
@@ -418,16 +412,12 @@ struct ChatCompletionsHandler: Sendable {
 
         if payload.stream == true {
             return streamingStructuredMessagesResponse(
-                container: container,
                 session: session,
                 prompt: prompt,
                 cachedTokens: cachedTokens,
                 role: lastRole,
-                params: params,
                 modelId: modelId,
                 stopSequences: stopSequences,
-                toolSpecs: toolSpecs,
-                additionalContext: additionalContext,
                 sessionId: sessionId,
                 sessionStore: sessionStore,
                 sessionCacheScope: Self.sessionCacheScope(additionalContext)

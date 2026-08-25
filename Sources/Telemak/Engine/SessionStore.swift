@@ -47,8 +47,6 @@ public actor SessionStore {
         return 32
     }
 
-    public var sessionCount: Int { entries.count }
-
     // MARK: - Snapshots for admin
 
     public struct Snapshot: Sendable, Encodable {

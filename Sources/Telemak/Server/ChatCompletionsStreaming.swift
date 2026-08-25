@@ -252,16 +252,12 @@ extension ChatCompletionsHandler {
     // for the next tool turn. Mirrors `streamingResponse` above.
 
     func streamingStructuredMessagesResponse(
-        container: ModelContainer,
         session: ChatSession,
         prompt: String,
         cachedTokens: Int,
         role: Chat.Message.Role,
-        params: GenerateParameters,
         modelId: String,
         stopSequences: [String],
-        toolSpecs: [[String: any Sendable]]?,
-        additionalContext: [String: any Sendable]?,
         sessionId: String?,
         sessionStore: SessionStore?,
         sessionCacheScope: String
