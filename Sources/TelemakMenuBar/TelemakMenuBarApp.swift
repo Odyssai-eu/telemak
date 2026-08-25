@@ -637,6 +637,11 @@ final class HealthPoller: ObservableObject {
     let engine: EngineController
     private var timer: Timer?
 
+    /// Single-flight guard (fix for #79): true while a fetch cycle is still
+    /// in flight. Bounds the cadence to one cycle at a time — under load the
+    /// freshness degrades, but the UI never freezes.
+    private var refreshInFlight = false
+
     init(settings: Settings, engine: EngineController) {
         self.settings = settings
         self.engine = engine
@@ -661,6 +666,12 @@ final class HealthPoller: ObservableObject {
     }
 
     func refresh() async {
+        // Prevent overlapping fetches – if a previous refresh hasn't finished,
+        // simply return. This guard is the core of the fix for issue #79.
+        if refreshInFlight { return }
+        refreshInFlight = true
+        defer { refreshInFlight = false }
+
         guard let url = settings.endpointURL?.appendingPathComponent("/health") else {
             isUp = false
             status = "Bad endpoint URL"
@@ -750,6 +761,7 @@ final class HealthPoller: ObservableObject {
         }
     }
 
+    /// Resets the activity UI state on error.
     private func clearActivity() {
         activeRequests = 0
         currentModel = nil
