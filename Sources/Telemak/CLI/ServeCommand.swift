@@ -53,6 +53,15 @@ struct Serve: AsyncParsableCommand {
         let stats = StatsTracker()
         let activity = ActivityTracker()
 
+        // Circuit breaker (issue #75): if the previous boot died mid-replay
+        // (residual write-ahead marker in state.json), drop the offending
+        // model now — before any load — so this boot can't crash-loop on
+        // the same model. Runs even with --no-replay so a marker never
+        // outlives the first boot after the crash.
+        if let stuck = try? await stateStore.consumeStuckReplay() {
+            logger.warning("previous boot crashed while replaying '\(stuck)' — removing from replay list; reload via /admin/load if recovered")
+        }
+
         if !noReplay {
             await replayState(registry: registry, stateStore: stateStore, logger: logger)
         }
@@ -91,11 +100,27 @@ struct Serve: AsyncParsableCommand {
             // Per-model: if the model isn't under the current effective dir
             // (e.g. the dir changed under us), the load below fails and is logged
             // — best-effort, non-fatal. No recordedDir bookkeeping needed.
+            //
+            // Write-ahead (issue #75): record `id` BEFORE the load. MLX
+            // GPU-timeout aborts the process from a Metal completion handler —
+            // uncatchable in Swift — so `do/catch` cannot protect us here. If
+            // the load kills the process, the marker survives and the next
+            // boot's breaker drops this model instead of crash-looping.
             do {
+                try await stateStore.markAttemptingReplay(id)
                 _ = try await registry.load(id)
                 logger.info("replayed model: \(id)")
             } catch {
                 logger.warning("failed to replay model \(id): \(error) — continuing")
+            }
+            // Reached on success AND on a catchable failure (the process
+            // survived). Clearing here is what keeps the marker accurate: a
+            // stale marker would make the NEXT boot wrongly evict a healthy
+            // model.
+            do {
+                try await stateStore.clearAttemptingReplay()
+            } catch {
+                logger.warning("could not clear replay marker for \(id): \(error)")
             }
         }
     }
