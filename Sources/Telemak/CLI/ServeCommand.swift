@@ -58,8 +58,12 @@ struct Serve: AsyncParsableCommand {
         // model now — before any load — so this boot can't crash-loop on
         // the same model. Runs even with --no-replay so a marker never
         // outlives the first boot after the crash.
-        if let stuck = try? await stateStore.consumeStuckReplay() {
-            logger.warning("previous boot crashed while replaying '\(stuck)' — removing from replay list; reload via /admin/load if recovered")
+        do {
+            if let stuck = try await stateStore.consumeStuckReplay() {
+                logger.warning("previous boot terminated while replaying '\(stuck)' (crash or manual stop) — skipping its replay; reload via /admin/load if needed")
+            }
+        } catch {
+            logger.error("failed to persist replay-circuit-breaker state; model may replay: \(error)")
         }
 
         if !noReplay {
