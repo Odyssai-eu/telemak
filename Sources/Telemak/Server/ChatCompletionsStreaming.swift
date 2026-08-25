@@ -165,7 +165,11 @@ extension ChatCompletionsHandler {
                 }
                 try await flushPendingContent(force: true)
 
-                let finishReason = anyToolCalls ? "tool_calls" : "stop"
+                let finishReason = MTPStopPolicy.finishReason(
+                    hasToolCalls: anyToolCalls,
+                    stoppedEarly: stopChecker.hit,
+                    stopReason: info?.stopReason
+                )
                 let stop = ChatCompletionChunk(
                     id: id, object: "chat.completion.chunk",
                     created: created, model: modelId,
@@ -356,7 +360,11 @@ extension ChatCompletionsHandler {
                 }
                 try await flushPendingContent(force: true)
 
-                let finishReason = anyToolCalls ? "tool_calls" : "stop"
+                let finishReason = MTPStopPolicy.finishReason(
+                    hasToolCalls: anyToolCalls,
+                    stoppedEarly: stopChecker.hit,
+                    stopReason: info?.stopReason
+                )
                 try await send(.init(
                     id: id,
                     object: "chat.completion.chunk",

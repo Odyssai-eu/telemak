@@ -141,10 +141,13 @@ struct ChatCompletionsHandler: Sendable {
         let effectiveInstructions: String? = (cacheHit != nil) ? nil : instructions
 
         // MTP fast path. If this main model has a paired speculative draft
-        // and the request doesn't need tool calls or vision (the draft
-        // can't propose either), route through the MTP iterator. Falls
-        // through to the regular ChatSession path on any unsupported
-        // feature so no caller is regressed by enabling a draft.
+        // and the request carries no vision input (images can't be expressed
+        // through the iterator's token-only interface), route through the
+        // MTP iterator. Tool specs ARE allowed (since A2): the chat template
+        // renders them into the prompt and the iterator processes them as
+        // regular tokens — only vision (and a session prompt-cache hit,
+        // see below) falls through to ChatSession, so no caller is
+        // regressed by enabling a draft.
         //
         // The session prompt-cache (cacheHit) is also incompatible with
         // the iterator's `targetVerify`/`rollback` semantics today, so
@@ -300,8 +303,11 @@ struct ChatCompletionsHandler: Sendable {
             promptTokensDetails: cachedTokens > 0 ? .init(cachedTokens: cachedTokens) : nil
         )
 
-        let _ = stoppedEarly
-        let finishReason = collectedToolCalls.isEmpty ? "stop" : "tool_calls"
+        let finishReason = MTPStopPolicy.finishReason(
+            hasToolCalls: !collectedToolCalls.isEmpty,
+            stoppedEarly: stoppedEarly,
+            stopReason: info?.stopReason
+        )
 
         let response = ChatCompletionResponse(
             id: "chatcmpl-\(UUID().uuidString.lowercased())",
@@ -502,7 +508,11 @@ struct ChatCompletionsHandler: Sendable {
             totalTokens: promptTokens + completionTokens,
             promptTokensDetails: cachedTokens > 0 ? .init(cachedTokens: cachedTokens) : nil
         )
-        let finishReason = collectedToolCalls.isEmpty ? "stop" : "tool_calls"
+        let finishReason = MTPStopPolicy.finishReason(
+            hasToolCalls: !collectedToolCalls.isEmpty,
+            stoppedEarly: stopChecker.hit,
+            stopReason: info?.stopReason
+        )
         let response = ChatCompletionResponse(
             id: "chatcmpl-\(UUID().uuidString.lowercased())",
             object: "chat.completion",

@@ -1,5 +1,6 @@
 import Foundation
 import Hummingbird
+import Logging
 import MLX
 import MLXLLM
 import MLXLMCommon
@@ -153,10 +154,24 @@ extension ChatCompletionsHandler {
 
         // A3 — tool-call recovery: models without native ToolCall events
         // emit tagged text blocks; recover them into a structured payload
-        // instead of leaking the raw envelope into `content`.
+        // instead of leaking the raw envelope into `content`. Then the same
+        // ThinkRepair the regular path applies (ChatCompletions.swift):
+        // templates that PRE-OPEN the think block leave an orphan `</think>`
+        // in the assembled text.
         let recovery = ChatCompletionsHandler.recoverToolCalls(from: result.text)
         let hasToolCalls = !recovery.toolCalls.isEmpty
-        let contentOut = hasToolCalls ? (recovery.content.isEmpty ? nil : recovery.content) : result.text
+        let contentOut = hasToolCalls
+            ? (recovery.content.isEmpty ? nil : ThinkRepair.repairComplete(recovery.content))
+            : ThinkRepair.repairComplete(result.text)
+
+        // MINEUR 2 — early iterator death (no stop, no max_tokens ceiling,
+        // e.g. `runRound` bailing on a nil `boundTarget`): the OpenAI
+        // contract has no `"cancelled"` value, so report `"stop"` — the
+        // least-wrong reason — but log for diagnosis.
+        if !result.hitStop && !result.hitCeiling {
+            let logger = Logger(label: "telemak.mtp")
+            logger.warning("MTP iterator died before max_tokens (\(result.tokensGenerated) tokens generated) — reporting finish_reason=stop")
+        }
 
         let response = ChatCompletionResponse(
             id: "chatcmpl-\(UUID().uuidString.lowercased())",
@@ -167,7 +182,7 @@ extension ChatCompletionsHandler {
                 .init(
                     index: 0,
                     message: ChatMessage(role: "assistant", content: contentOut, toolCalls: hasToolCalls ? recovery.toolCalls : nil),
-                    finishReason: hasToolCalls ? "tool_calls" : "stop"
+                    finishReason: MTPStopPolicy.finishReason(hasToolCalls: hasToolCalls, hitStop: result.hitStop, hitCeiling: result.hitCeiling)
                 )
             ],
             usage: ChatCompletionResponse.Usage(
@@ -251,7 +266,9 @@ extension ChatCompletionsHandler {
                     return MTPStreamingResult(
                         promptTokens: promptTokens.count,
                         tokensGenerated: collected.tokensGenerated,
-                        pieces: collected.pieces
+                        pieces: collected.pieces,
+                        hitStop: collected.hitStop,
+                        hitCeiling: collected.hitCeiling
                     )
                 }
                 promptTokenCount = result.promptTokens
@@ -264,15 +281,24 @@ extension ChatCompletionsHandler {
                 // text before emitting: recovered content goes out as
                 // content deltas, recovered calls as tool_calls deltas —
                 // same chunk shape as the regular streaming path.
+                //
+                // ThinkRepair runs per emitted piece, exactly like the
+                // regular streaming path (`thinkRepair.feed(...)` in
+                // ChatCompletionsStreaming.swift). It is content-driven and
+                // a no-op for models emitting well-formed `<think>` pairs;
+                // templates that pre-open the think block get their orphan
+                // closing tag repaired instead of leaking downstream.
+                var thinkRepair = ThinkRepair()
                 let recovery = ChatCompletionsHandler.recoverToolCalls(from: visiblePieces.joined())
                 let anyToolCalls = !recovery.toolCalls.isEmpty
                 if anyToolCalls {
-                    if !recovery.content.isEmpty {
+                    let recoveredContent = thinkRepair.feed(recovery.content)
+                    if !recoveredContent.isEmpty {
                         await activity.setPhase(activityId, .streaming)
                         let chunk = ChatCompletionChunk(
                             id: id, object: "chat.completion.chunk",
                             created: created, model: modelId,
-                            choices: [.init(index: 0, delta: .init(role: nil, content: recovery.content), finishReason: nil)]
+                            choices: [.init(index: 0, delta: .init(role: nil, content: recoveredContent), finishReason: nil)]
                         )
                         try await send(chunk)
                     }
@@ -290,20 +316,31 @@ extension ChatCompletionsHandler {
                     // already done. UI behaviour is identical to a real-time
                     // stream of the same payload size.
                     for piece in visiblePieces where !piece.isEmpty {
+                        let emit = thinkRepair.feed(piece)
+                        guard !emit.isEmpty else { continue }
                         await activity.setPhase(activityId, .streaming)
                         let chunk = ChatCompletionChunk(
                             id: id, object: "chat.completion.chunk",
                             created: created, model: modelId,
-                            choices: [.init(index: 0, delta: .init(role: nil, content: piece), finishReason: nil)]
+                            choices: [.init(index: 0, delta: .init(role: nil, content: emit), finishReason: nil)]
                         )
                         try await send(chunk)
                     }
                 }
 
+                // finish_reason parity with the fork: "tool_calls" wins,
+                // then EOS/stop-sequence → "stop", max_tokens ceiling →
+                // "length" (previously always "stop", lying on truncation).
+                // Early iterator death → "stop" + warning, same as the
+                // non-streaming path.
+                if !result.hitStop && !result.hitCeiling {
+                    let logger = Logger(label: "telemak.mtp")
+                    logger.warning("MTP iterator died before max_tokens (\(result.tokensGenerated) tokens generated) — reporting finish_reason=stop")
+                }
                 let stop = ChatCompletionChunk(
                     id: id, object: "chat.completion.chunk",
                     created: created, model: modelId,
-                    choices: [.init(index: 0, delta: .init(role: nil, content: nil), finishReason: anyToolCalls ? "tool_calls" : "stop")]
+                    choices: [.init(index: 0, delta: .init(role: nil, content: nil), finishReason: MTPStopPolicy.finishReason(hasToolCalls: anyToolCalls, hitStop: result.hitStop, hitCeiling: result.hitCeiling))]
                 )
                 try await send(stop)
 
@@ -394,7 +431,9 @@ extension ChatCompletionsHandler {
             tokensGenerated: collected.tokensGenerated,
             acceptance: collected.acceptance,
             accepted: collected.accepted,
-            proposed: collected.proposed
+            proposed: collected.proposed,
+            hitStop: collected.hitStop,
+            hitCeiling: collected.hitCeiling
         )
     }
 
@@ -402,6 +441,17 @@ extension ChatCompletionsHandler {
     /// (filtered by `StopChecker`) plus aggregated stats. Used by both
     /// the streaming and non-streaming paths so the logic stays in one
     /// place.
+    ///
+    /// Stop semantics live in `MTPGenerationCollector.collect`
+    /// (MTPStopPolicy.swift): EOS/stop tokens break the loop BEFORE being
+    /// counted or decoded — the same contract as the fork's generation
+    /// loops (Evaluate.swift): `runSynchronousGenerationLoop` and its
+    /// AsyncStream variant (`streamDetails`), both verified semantically
+    /// identical, which the regular `ChatSession` path relies on.
+    /// Previously this loop had no
+    /// stop-token handling at all: generation ran to `max_tokens`,
+    /// decoding EOS markers (`<|im_end|>`, …) into the visible text and
+    /// hallucinating extra turns past the model's answer.
     private func runMTPIteratorCollectingPieces(
         ctx: ModelContext,
         draftEntry: ModelRegistry.LoadedDraft,
@@ -409,15 +459,22 @@ extension ChatCompletionsHandler {
         params: GenerateParameters,
         stopSequences: [String]
     ) throws -> MTPPiecesResult {
-        var generated: [Int] = []
-        var stopChecker = StopChecker(stops: stopSequences)
-        var pieces: [String] = []
-        var lastDecoded = ""
         let maxTokens = params.maxTokens ?? 512
+        // Parity with the fork's private `buildStopTokenIds`: config EOS
+        // ids + tokenizer EOS + config extra-EOS tokens (resolved through
+        // the tokenizer) + unknown-token id.
+        let stopPolicy = MTPStopPolicy(
+            eosTokenIds: ctx.configuration.eosTokenIds,
+            tokenizerEosTokenId: ctx.tokenizer.eosTokenId,
+            extraEOSTokens: ctx.configuration.extraEOSTokens,
+            convertTokenToId: { ctx.tokenizer.convertTokenToId($0) },
+            unknownTokenId: ctx.tokenizer.unknownTokenId
+        )
 
         let acceptance: Double
         let accepted: Int
         let proposed: Int
+        let collected: MTPGenerationCollector.Result
 
         switch draftEntry.model {
         case .qwen35(let draftModel):
@@ -430,17 +487,13 @@ extension ChatCompletionsHandler {
                 promptTokens: promptTokens, maxTokens: maxTokens,
                 blockSize: nil, parameters: params
             )
-            while let tok = iterator.next() {
-                generated.append(tok)
-                let decoded = ctx.tokenizer.decode(tokenIds: generated)
-                let delta = String(decoded.dropFirst(lastDecoded.count))
-                if !delta.isEmpty {
-                    let visible = stopChecker.feed(delta)
-                    if !visible.isEmpty { pieces.append(visible) }
-                    lastDecoded = decoded
-                }
-                if stopChecker.hit { break }
-            }
+            collected = MTPGenerationCollector.collect(
+                next: { iterator.next() },
+                maxTokens: maxTokens,
+                stopPolicy: stopPolicy,
+                stopSequences: stopSequences,
+                decode: { ctx.tokenizer.decode(tokenIds: $0) }
+            )
             acceptance = iterator.acceptanceRate
             accepted = iterator.totalAccepted
             proposed = iterator.totalProposed
@@ -455,33 +508,26 @@ extension ChatCompletionsHandler {
                 promptTokens: promptTokens, maxTokens: maxTokens,
                 blockSize: 6, parameters: params
             )
-            while let tok = try iterator.next() {
-                generated.append(tok)
-                let decoded = ctx.tokenizer.decode(tokenIds: generated)
-                let delta = String(decoded.dropFirst(lastDecoded.count))
-                if !delta.isEmpty {
-                    let visible = stopChecker.feed(delta)
-                    if !visible.isEmpty { pieces.append(visible) }
-                    lastDecoded = decoded
-                }
-                if stopChecker.hit { break }
-            }
+            collected = try MTPGenerationCollector.collect(
+                next: { try iterator.next() },
+                maxTokens: maxTokens,
+                stopPolicy: stopPolicy,
+                stopSequences: stopSequences,
+                decode: { ctx.tokenizer.decode(tokenIds: $0) }
+            )
             acceptance = iterator.acceptanceRate
             accepted = iterator.totalAccepted
             proposed = iterator.totalProposed
         }
 
-        if !stopChecker.hit {
-            let tail = stopChecker.flushRemaining()
-            if !tail.isEmpty { pieces.append(tail) }
-        }
-
         return MTPPiecesResult(
-            pieces: pieces,
-            tokensGenerated: generated.count,
+            pieces: collected.pieces,
+            tokensGenerated: collected.tokensGenerated,
             acceptance: acceptance,
             accepted: accepted,
-            proposed: proposed
+            proposed: proposed,
+            hitStop: collected.hitStop,
+            hitCeiling: collected.hitCeiling
         )
     }
 }
@@ -495,6 +541,11 @@ private struct MTPRunResult {
     let acceptance: Double
     let accepted: Int
     let proposed: Int
+    /// True when generation stopped on a stop-token or user stop-sequence.
+    let hitStop: Bool
+    /// True when the `max_tokens` ceiling was reached. Both false when the
+    /// iterator died early (see `MTPGenerationCollector.Result.hitCeiling`).
+    let hitCeiling: Bool
 }
 
 private struct MTPPiecesResult {
@@ -503,10 +554,16 @@ private struct MTPPiecesResult {
     let acceptance: Double
     let accepted: Int
     let proposed: Int
+    /// See `MTPRunResult.hitStop` / `hitCeiling`.
+    let hitStop: Bool
+    let hitCeiling: Bool
 }
 
 private struct MTPStreamingResult: Sendable {
     let promptTokens: Int
     let tokensGenerated: Int
     let pieces: [String]
+    /// See `MTPRunResult.hitStop` / `hitCeiling`.
+    let hitStop: Bool
+    let hitCeiling: Bool
 }
