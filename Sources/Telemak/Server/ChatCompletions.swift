@@ -266,6 +266,15 @@ struct ChatCompletionsHandler: Sendable {
             }
         } catch {
             await activity.fail(activityId, error: "\(error)")
+            if let sessionId, let sessionStore {
+                await SessionCachePersistence.save(
+                    session: session,
+                    sessionId: sessionId,
+                    modelId: modelId,
+                    cacheScope: sessionCacheScope,
+                    sessionStore: sessionStore
+                )
+            }
             return jsonError(.internalServerError, code: "generation_failed",
                               message: "model generation failed: \(error)")
         }
