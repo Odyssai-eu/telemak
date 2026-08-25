@@ -69,7 +69,7 @@ if [ ! -x "$TELEMAK_BIN" ] || [ ! -x "$MENUBAR_BIN" ] || [ ! -x "$MONITOR_BIN" ]
   "$ROOT/scripts/build.sh" "$CONFIGURATION"
 fi
 
-for f in \                                                 "$TELEMAK_BIN" "$MENUBAR_BIN" "$MONITOR_BIN"; do
+for f in "$TELEMAK_BIN" "$MENUBAR_BIN" "$MONITOR_BIN"; do
   [ -x "$f" ] || die "missing build artifact: $f"
 done
 for b in $BUNDLES; do
