@@ -54,6 +54,18 @@ struct AnthropicMessagesHandler: Sendable {
         if let p = payload.topP { params.topP = p }
         if let k = payload.topK { params.topK = k }
 
+        // Build templateContext for enable_thinking and reasoning_effort
+        var templateContext: [String: any Sendable] = [:]
+        let effectiveThinking = payload.enableThinking ?? ServerDefaults.enableThinking
+        if let effectiveThinking {
+            templateContext["enable_thinking"] = effectiveThinking
+        }
+        if let reasoningEffort = payload.reasoningEffort, !reasoningEffort.isEmpty {
+            templateContext["reasoning_effort"] = reasoningEffort
+        }
+        let additionalContext: [String: any Sendable]? = templateContext.isEmpty ? nil : templateContext
+        let sessionCacheScope = Self.sessionCacheScope(additionalContext)
+
         let system = payload.system?.asString
         let userPrompt = anthropicRenderPrompt(payload.messages)
         if userPrompt.isEmpty {
@@ -70,7 +82,7 @@ struct AnthropicMessagesHandler: Sendable {
         let sessionId = payload.sessionId ?? request.headers[.init("X-Session-Id")!]
         let cacheHit: URL? = await {
             guard let sessionId, let sessionStore else { return nil }
-            return await sessionStore.hit(sessionId: sessionId, modelId: modelId)
+            return await sessionStore.hit(sessionId: sessionId, modelId: modelId, cacheScope: sessionCacheScope)
         }()
         let prompt: String = cacheHit != nil ? lastUserText(payload.messages) : userPrompt
         let effectiveSystem: String? = cacheHit != nil ? nil : system
@@ -85,6 +97,8 @@ struct AnthropicMessagesHandler: Sendable {
                 images: imageBatch,
                 modelId: modelId,
                 sessionId: sessionId,
+                additionalContext: additionalContext,
+                sessionCacheScope: sessionCacheScope,
                 stats: stats,
                 sessionStore: sessionStore
             )
@@ -96,12 +110,12 @@ struct AnthropicMessagesHandler: Sendable {
             do {
                 let (loaded, _) = try loadPromptCache(url: cacheHit)
                 cachedTokens = loaded.first?.offset ?? 0
-                session = ChatSession(container, instructions: nil, cache: loaded, generateParameters: params)
+                session = ChatSession(container, instructions: nil, cache: loaded, generateParameters: params, additionalContext: additionalContext)
             } catch {
-                session = ChatSession(container, instructions: system, generateParameters: params)
+                session = ChatSession(container, instructions: system, generateParameters: params, additionalContext: additionalContext)
             }
         } else {
-            session = ChatSession(container, instructions: system, generateParameters: params)
+            session = ChatSession(container, instructions: system, generateParameters: params, additionalContext: additionalContext)
         }
 
         let activityId = await activity.begin(model: modelId, phase: .prefill)
@@ -133,7 +147,7 @@ struct AnthropicMessagesHandler: Sendable {
                 session: session,
                 sessionId: sessionId,
                 modelId: modelId,
-                cacheScope: "",
+                cacheScope: sessionCacheScope,
                 sessionStore: sessionStore
             )
         }
@@ -178,6 +192,8 @@ struct AnthropicMessagesHandler: Sendable {
         images: VisionImageBatch,
         modelId: String,
         sessionId: String?,
+        additionalContext: [String: any Sendable]?,
+        sessionCacheScope: String,
         stats: StatsTracker,
         sessionStore: SessionStore?
     ) -> Response {
@@ -191,12 +207,12 @@ struct AnthropicMessagesHandler: Sendable {
                 do {
                     let (loaded, _) = try loadPromptCache(url: cacheHit)
                     cachedTokens = loaded.first?.offset ?? 0
-                    session = ChatSession(container, instructions: nil, cache: loaded, generateParameters: params)
+                    session = ChatSession(container, instructions: nil, cache: loaded, generateParameters: params, additionalContext: additionalContext)
                 } catch {
-                    session = ChatSession(container, instructions: effectiveSystem, generateParameters: params)
+                    session = ChatSession(container, instructions: effectiveSystem, generateParameters: params, additionalContext: additionalContext)
                 }
             } else {
-                session = ChatSession(container, instructions: effectiveSystem, generateParameters: params)
+                session = ChatSession(container, instructions: effectiveSystem, generateParameters: params, additionalContext: additionalContext)
             }
 
             // Event encoding: `event: <name>\ndata: {<json>}\n\n`.
@@ -312,7 +328,7 @@ struct AnthropicMessagesHandler: Sendable {
                     session: session,
                     sessionId: sessionId,
                     modelId: modelId,
-                    cacheScope: "",
+                    cacheScope: sessionCacheScope,
                     sessionStore: sessionStore
                 )
             }
@@ -348,6 +364,14 @@ struct AnthropicMessagesHandler: Sendable {
             return last.content.asPlainText
         }
         return ""
+    }
+
+    private static func sessionCacheScope(_ context: [String: any Sendable]?) -> String {
+        guard let context, !context.isEmpty else { return "" }
+        return context.keys.sorted().map { key in
+            let value = context[key].map { "\($0)" } ?? ""
+            return "\(key)=\(value)"
+        }.joined(separator: ";")
     }
 
     private func jsonError(_ status: HTTPResponse.Status, type: String, message: String) -> Response {

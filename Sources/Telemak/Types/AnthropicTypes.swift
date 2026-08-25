@@ -13,6 +13,8 @@ struct AnthropicMessagesRequest: Codable, Sendable {
     var topP: Float?
     var topK: Int?
     var stream: Bool?
+    var enableThinking: Bool?
+    var reasoningEffort: String?
     var sessionId: String?
 
     enum CodingKeys: String, CodingKey {
@@ -24,6 +26,8 @@ struct AnthropicMessagesRequest: Codable, Sendable {
         case topP = "top_p"
         case topK = "top_k"
         case stream
+        case enableThinking = "enable_thinking"
+        case reasoningEffort = "reasoning_effort"
         case sessionId = "session_id"
     }
 }
